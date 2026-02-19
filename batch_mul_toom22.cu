@@ -5,8 +5,50 @@
 #include "batch_mul_toom22.h"
 #include "batch_mul_direct.h"
 
-__host__ __device__ inline int ceil_div(int a, int b) {
+inline int ceil_div(int a, int b) {
     return (a + b - 1) / b;
+}
+
+// Add with carry-out (sets carry flag)
+__device__ __forceinline__ uint32_t add_cc(uint32_t a, uint32_t b) {
+    uint32_t r;
+    asm volatile ("add.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+// Add with carry-in and carry-out (uses and sets carry flag)
+__device__ __forceinline__ uint32_t addc_cc(uint32_t a, uint32_t b) {
+    uint32_t r;
+    asm volatile ("addc.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+// Add with carry-in (uses carry flag, no output carry)
+__device__ __forceinline__ uint32_t addc(uint32_t a, uint32_t b) {
+    uint32_t r;
+    asm volatile ("addc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+// Subtract with borrow-out (sets carry flag)
+__device__ __forceinline__ uint32_t sub_cc(uint32_t a, uint32_t b) {
+    uint32_t r;
+    asm volatile ("sub.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+// Subtract with borrow-in and borrow-out (uses and sets carry flag)
+__device__ __forceinline__ uint32_t subc_cc(uint32_t a, uint32_t b) {
+    uint32_t r;
+    asm volatile ("subc.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+// Subtract with borrow-in (uses carry flag, no output borrow)
+__device__ __forceinline__ uint32_t subc(uint32_t a, uint32_t b) {
+    uint32_t r;
+    asm volatile ("subc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
+    return r;
 }
 
 // Transform kernel: decomposes inputs and prepares 3N interleaved arrays
@@ -17,53 +59,51 @@ __global__ void batch_mul_toom22_transform_kernel(
     uint32_t * A_out, uint32_t * B_out,
     int N, int L, int L_split, int L_half
 ) {
+    // L_split = ceil(L/2)
+    // L_half = L_split + 1 (padded size)
+    int L_lower = L_split;  // = ceil(L/2)
+    int L_upper = L / 2;    // = floor(L/2)
+    const uint32_t * AB;
+    uint32_t * AB_out;
+    if (blockIdx.y == 0) {
+        AB = A;
+        AB_out = A_out;
+    } else {
+        AB = B;
+        AB_out = B_out;
+    }
+    for (int idx0 = blockIdx.x * blockDim.x; idx0 < N; idx0 += blockDim.x * gridDim.x) {
+        for (int idx = idx0; idx < N && idx < idx0 + blockDim.x; idx++){
+            const uint32_t * a = AB + idx * L;
+            uint32_t * a0 = AB_out + idx * L_half;
+            uint32_t * a1 = AB_out + (N + idx) * L_half;
+            for (int i = threadIdx.x; i < L_half; i += blockDim.x){
+                if (i < L_lower) {
+                    a1[i] = a[i];
+                } else {
+                    a1[i] = 0;
+                }
+            }
+            for (int i = threadIdx.x; i < L_half; i += blockDim.x){    
+                if (i < L_upper) {
+                    a0[i] = a[L_lower + i];
+                } else {
+                    a0[i] = 0;
+                }
+            }
+        }
+    }
+    __syncthreads();
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += blockDim.x * gridDim.x) {
-        const uint32_t * a = A + idx * L;
-        const uint32_t * b = B + idx * L;
-        
-        uint32_t * a0 = A_out + idx * L_half;
-        uint32_t * a1 = A_out + (N + idx) * L_half;
-        uint32_t * a_sum = A_out + (2 * N + idx) * L_half;
-        uint32_t * b0 = B_out + idx * L_half;
-        uint32_t * b1 = B_out + (N + idx) * L_half;
-        uint32_t * b_sum = B_out + (2 * N + idx) * L_half;
-        
-        // L_split = ceil(L/2)
-        // L_half = L_split + 1 (padded size)
-        int L_lower = L_split;  // = ceil(L/2)
-        int L_upper = L / 2;    // = floor(L/2)
-        
-        // Copy a1 (lower L_lower words), pad with zeros to L_half
-        for (int i = 0; i < L_lower; i++) {
-            a1[i] = a[i];
-            b1[i] = b[i];
-        }
-        for (int i = L_lower; i < L_half; i++) {
-            a1[i] = 0;
-            b1[i] = 0;
-        }
-        
-        // Copy a0 (upper L_upper words), pad with zeros to L_half
-        for (int i = 0; i < L_upper; i++) {
-            a0[i] = a[L_lower + i];
-            b0[i] = b[L_lower + i];
-        }
-        for (int i = L_upper; i < L_half; i++) {
-            a0[i] = 0;
-            b0[i] = 0;
-        }
-        
+        uint32_t * a0 = AB_out + idx * L_half;
+        uint32_t * a1 = AB_out + (N + idx) * L_half;
+        uint32_t * a_sum = AB_out + (2 * N + idx) * L_half;
+
         // Compute a0 + a1 and b0 + b1 with carry propagation
-        uint32_t carry_a = 0;
-        uint32_t carry_b = 0;
-        for (int i = 0; i < L_half; i++) {
-            uint64_t sum_a = (uint64_t)a0[i] + (uint64_t)a1[i] + carry_a;
-            a_sum[i] = (uint32_t)sum_a;
-            carry_a = (uint32_t)(sum_a >> 32);
-            
-            uint64_t sum_b = (uint64_t)b0[i] + (uint64_t)b1[i] + carry_b;
-            b_sum[i] = (uint32_t)sum_b;
-            carry_b = (uint32_t)(sum_b >> 32);
+
+        a_sum[0] = add_cc(a0[0], a1[0]);
+        for (int i = 1; i < L_half; i ++){
+            a_sum[i] = addc_cc(a0[i], a1[i]);
         }
     }
 }
@@ -87,70 +127,35 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
         int result_size = L * 2;
         
         // Compute c2' = c2 - c0 - c1
-        uint32_t c2_adjusted[514]; // Max c_size for L=512: (257)*2 = 514
+        uint32_t c2_adjusted[BATCH_MUL_TOOM22_L_MAX + 2];
         
         for (int i = 0; i < c_size; i++) {
             c2_adjusted[i] = c2[i];
         }
         
-        uint32_t borrow = 0;
-        for (int i = 0; i < c_size; i++) {
-            uint64_t diff = (uint64_t)c2_adjusted[i] - (uint64_t)c0[i] - borrow;
-            c2_adjusted[i] = (uint32_t)diff;
-            borrow = (diff >> 32) & 1;
+        c2_adjusted[0] = sub_cc(c2_adjusted[0], c0[0]);
+        for (int i = 1; i < c_size; i++) {
+            c2_adjusted[i] = subc_cc(c2_adjusted[i], c0[i]);
         }
         
-        borrow = 0;
-        for (int i = 0; i < c_size; i++) {
-            uint64_t diff = (uint64_t)c2_adjusted[i] - (uint64_t)c1[i] - borrow;
-            c2_adjusted[i] = (uint32_t)diff;
-            borrow = (diff >> 32) & 1;
+        c2_adjusted[0] = sub_cc(c2_adjusted[0], c1[0]);
+        for (int i = 1; i < c_size; i++) {
+            c2_adjusted[i] = subc_cc(c2_adjusted[i], c1[i]);
         }
-        
-        // Initialize result to zero
-        for (int i = 0; i < result_size; i++) {
-            r[i] = 0;
-        }
-        
-        // Add c1 to result[0 : c_size-1]
-        int words_to_copy = (c_size < result_size) ? c_size : result_size;
-        for (int i = 0; i < words_to_copy; i++) {
+
+        for (int i = 0; i < L_split * 2; i ++){
             r[i] = c1[i];
         }
-        
-        // Add c2_adjusted to result at offset L_split (NOT L_half)
-        uint32_t carry = 0;
-        for (int i = 0; i < c_size && (L_split + i) < result_size; i++) {
-            uint64_t sum = (uint64_t)r[L_split + i] + (uint64_t)c2_adjusted[i] + carry;
-            r[L_split + i] = (uint32_t)sum;
-            carry = (uint32_t)(sum >> 32);
+        for (int i = L_split * 2; i < result_size; i ++){
+            r[i] = c0[i - L_split * 2];
         }
-        int pos = L_split + c_size;
-        while (carry && pos < result_size) {
-            uint64_t sum = (uint64_t)r[pos] + carry;
-            r[pos] = (uint32_t)sum;
-            carry = (uint32_t)(sum >> 32);
-            pos++;
+
+        r[L_split] = add_cc(r[L_split], c2_adjusted[0]);
+        for (int i = L_split + 1; i < L_split + c_size; i++) {
+            r[i] = addc_cc(r[i], c2_adjusted[i - L_split]);
         }
-        
-        // Add c0 to result at offset 2*L_split (NOT 2*L_half)
-        int c0_offset = 2 * L_split;
-        int c0_words = result_size - c0_offset;
-        if (c0_words > c_size) c0_words = c_size;
-        if (c0_words > 0) {
-            carry = 0;
-            for (int i = 0; i < c0_words; i++) {
-                uint64_t sum = (uint64_t)r[c0_offset + i] + (uint64_t)c0[i] + carry;
-                r[c0_offset + i] = (uint32_t)sum;
-                carry = (uint32_t)(sum >> 32);
-            }
-            pos = c0_offset + c0_words;
-            while (carry && pos < result_size) {
-                uint64_t sum = (uint64_t)r[pos] + carry;
-                r[pos] = (uint32_t)sum;
-                carry = (uint32_t)(sum >> 32);
-                pos++;
-            }
+        for (int i = L_split + c_size; i < result_size; i++) {
+            r[i] = addc_cc(r[i], 0);
         }
     }
 }
@@ -187,9 +192,9 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
     uint32_t * next_workspace = C_combined + (size_t)3 * N * c_size;
     
     int num_blocks = (N + threads_per_block - 1) / threads_per_block;
-    if (num_blocks > 170 * 16) num_blocks = 170 * 16;
+    if (num_blocks > 170 * 8) num_blocks = 170 * 8;
     
-    batch_mul_toom22_transform_kernel<<<num_blocks, threads_per_block>>>(
+    batch_mul_toom22_transform_kernel<<<dim3(num_blocks, 2, 1), threads_per_block>>>(
         A, B, A_combined, B_combined, N, L, L_split, L_half
     );
     
