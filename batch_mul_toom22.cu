@@ -192,7 +192,6 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
     batch_mul_toom22_transform_kernel<<<num_blocks, threads_per_block>>>(
         A, B, A_combined, B_combined, N, L, L_split, L_half
     );
-    cudaDeviceSynchronize();
     
     // Single recursive call with 3N instances
     batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * N, L_half);
@@ -266,11 +265,6 @@ void batch_mul_toom22(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * wor
         return;
     }
     
-    if (L <= BATCH_MUL_DIRECT_L_MAX) {
-        batch_mul_direct(A, B, ret, N, L);
-        return;
-    }
-    
     int N_max;
     if (L > 250) {
         N_max = 170 * 128;
@@ -279,44 +273,13 @@ void batch_mul_toom22(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * wor
     } else {
         N_max = 170 * 128 * 4;
     }
-    
-    const int threads_per_block = BATCH_MUL_TOOM22_THREADS_PER_BLOCK;
-    
+
     for (int offset = 0; offset < N; offset += N_max) {
         int chunk_N = (offset + N_max <= N) ? N_max : (N - offset);
         
         uint32_t * A_chunk = A + (size_t)offset * L;
         uint32_t * B_chunk = B + (size_t)offset * L;
         uint32_t * ret_chunk = ret + (size_t)offset * (L * 2);
-        
-        if (chunk_N == N && offset == 0) {
-            batch_mul_toom22_internal(A, B, ret, workspace, N, L);
-        } else {
-            int L_split = ceil_div(L, 2);
-            int L_half = L_split + 1;
-            // Round up to multiple of 4 when about to use direct method
-            if (L_half <= BATCH_MUL_DIRECT_L_MAX) {
-                L_half = (L_half + 3) & ~3;
-            }
-            int c_size = L_half * 2;
-            
-            uint32_t * A_combined = workspace;
-            uint32_t * B_combined = A_combined + (size_t)3 * chunk_N * L_half;
-            uint32_t * C_combined = B_combined + (size_t)3 * chunk_N * L_half;
-            uint32_t * next_workspace = C_combined + (size_t)3 * chunk_N * c_size;
-            
-            int num_blocks = (chunk_N + threads_per_block - 1) / threads_per_block;
-            if (num_blocks > 170 * 16) num_blocks = 170 * 16;
-            
-            batch_mul_toom22_transform_kernel<<<num_blocks, threads_per_block>>>(
-                A_chunk, B_chunk, A_combined, B_combined, chunk_N, L, L_split, L_half
-            );
-            
-            batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * chunk_N, L_half);
-            
-            batch_mul_toom22_reconstruct_kernel<<<num_blocks, threads_per_block>>>(
-                ret_chunk, C_combined, chunk_N, L, L_split, L_half
-            );
-        }
+        batch_mul_toom22_internal(A_chunk, B_chunk, ret_chunk, workspace, chunk_N, L);
     }
 }
