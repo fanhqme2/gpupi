@@ -172,6 +172,13 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
     
     int L_split = ceil_div(L, 2);  // Actual split point = ceil(L/2)
     int L_half = L_split + 1;       // Padded buffer size
+    
+    // When about to use direct method, round L_half up to multiple of 4
+    // This ensures better memory alignment for the direct multiplication kernel
+    if (L_half <= BATCH_MUL_DIRECT_L_MAX) {
+        L_half = (L_half + 3) & ~3;  // Round up to next multiple of 4
+    }
+    
     int c_size = L_half * 2;
     
     uint32_t * A_combined = workspace;
@@ -203,6 +210,10 @@ static size_t workspace_size_words_internal(int N, int L) {
     
     int L_split = ceil_div(L, 2);
     int L_half = L_split + 1;
+    // Round up to multiple of 4 when about to use direct method
+    if (L_half <= BATCH_MUL_DIRECT_L_MAX) {
+        L_half = (L_half + 3) & ~3;
+    }
     int c_size = L_half * 2;
     
     size_t current = (size_t)3 * N * L_half + (size_t)3 * N * L_half + (size_t)3 * N * c_size;
@@ -219,6 +230,10 @@ static size_t workspace_size_words_chunk(int chunk_N, int L) {
     
     int L_split = ceil_div(L, 2);
     int L_half = L_split + 1;
+    // Round up to multiple of 4 when about to use direct method
+    if (L_half <= BATCH_MUL_DIRECT_L_MAX) {
+        L_half = (L_half + 3) & ~3;
+    }
     int c_size = L_half * 2;
     
     size_t current = (size_t)3 * chunk_N * L_half + (size_t)3 * chunk_N * L_half + (size_t)3 * chunk_N * c_size;
@@ -279,6 +294,10 @@ void batch_mul_toom22(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * wor
         } else {
             int L_split = ceil_div(L, 2);
             int L_half = L_split + 1;
+            // Round up to multiple of 4 when about to use direct method
+            if (L_half <= BATCH_MUL_DIRECT_L_MAX) {
+                L_half = (L_half + 3) & ~3;
+            }
             int c_size = L_half * 2;
             
             uint32_t * A_combined = workspace;

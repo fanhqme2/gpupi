@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 const int BATCH_MUL_TOOM22_L_MAX = 512; // at most 512 words (16384 bits) per integer
-const int BATCH_MUL_TOOM22_THREADS_PER_BLOCK = 16; // tunable constant
+const int BATCH_MUL_TOOM22_THREADS_PER_BLOCK = 8; // tunable constant
 
 // multiply N large integers of L words each, using Toom-Cook 2-way multiplication, and store the result in ret
 // A : N * L, device memory pointer

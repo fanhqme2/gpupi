@@ -28,6 +28,8 @@ c0 = a0 * b0
 c1 = a1 * b1
 c2 = (a0 + a1) * (b0 + b1)
 L_half is chosen so that both (a0+a1) and (b0+b1) fits into L_half words (L_split + 1 = ceil(L/2) + 1).
+
+Additionally, when L_half would be <= BATCH_MUL_DIRECT_L_MAX (i.e., when the next recursive level will use the direct method), L_half is rounded up to the next multiple of 4. This ensures better memory alignment and improves performance of the direct multiplication kernel. The actual split point L_split remains unchanged - only the buffer size L_half is adjusted.
 The arrays of the reduced operands and results should be allocated in the workspace (incrementing the workspace pointer before passing to subsequent recursive calls).
 
 This reduction should be done by a kernel batch_mul_toom22_transform_kernel that:
