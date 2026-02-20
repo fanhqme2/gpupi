@@ -366,12 +366,6 @@ __global__ void batch_mul_direct_kernel3(uint32_t * A, uint32_t * B, uint32_t * 
 }
 
 void batch_mul_direct(uint32_t * A, uint32_t * B, uint32_t * ret, int N, int L){
-    // const int threads_per_block = 16;
-    // int num_blocks = (N + threads_per_block - 1) / threads_per_block;
-    // if (num_blocks >= 170 * 16) {
-    //     num_blocks = 170 * 16;
-    // }
-    // batch_mul_direct_kernel2<<<num_blocks, threads_per_block>>>(A, B, ret, N, L);
     if (L < 52){
         const int threads_per_block = 16;
         int num_blocks = (N + threads_per_block - 1) / threads_per_block;
