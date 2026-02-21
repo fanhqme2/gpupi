@@ -3,12 +3,11 @@
 #include "batch_mul_direct.h"
 
 // 32 thread version
-template<int BLOCK_SIZE>
+template<int L_BLOCK, int BLOCK_SIZE>
 __global__ void batch_mul_direct_kernel3(uint32_t * A, uint32_t * B, uint32_t * ret, int N, int L){
-
     __shared__ uint32_t a[BATCH_MUL_DIRECT_L_MAX][BLOCK_SIZE + 1];
     __shared__ uint32_t b[BATCH_MUL_DIRECT_L_MAX][BLOCK_SIZE + 1], outer_carry[BLOCK_SIZE + 1];
-    __shared__ uint32_t r[BLOCK_SIZE * 2][BLOCK_SIZE + 1];
+    __shared__ uint32_t r[L_BLOCK * 2][BLOCK_SIZE + 1];
     for (int idx0 = blockIdx.x * BLOCK_SIZE; idx0 < N; idx0 += gridDim.x * BLOCK_SIZE){
         int batch_len = min(BLOCK_SIZE, N - idx0);
         if (batch_len == BLOCK_SIZE){
@@ -40,14 +39,14 @@ __global__ void batch_mul_direct_kernel3(uint32_t * A, uint32_t * B, uint32_t * 
                 }
             }
         }
-        for (int i = 0; i < BLOCK_SIZE * 2; i ++){
+        for (int i = 0; i < L_BLOCK * 2; i ++){
             r[i][threadIdx.x] = 0;
         }
         outer_carry[threadIdx.x] = 0;
         __syncthreads();
-        int L_down = (L - 1) & -BLOCK_SIZE;
-        for (int sum_ij = 0; sum_ij <= L_down * 2; sum_ij += BLOCK_SIZE){
-            for (int i0 = max(0, sum_ij - L_down); i0 < L && i0 <= sum_ij; i0 += BLOCK_SIZE){
+        int L_down = (L - 1) & -L_BLOCK;
+        for (int sum_ij = 0; sum_ij <= L_down * 2; sum_ij += L_BLOCK){
+            for (int i0 = max(0, sum_ij - L_down); i0 < L && i0 <= sum_ij; i0 += L_BLOCK){
                 int j0 = sum_ij - i0;
                 uint64_t standing_carry = 0;
                 // r  r  r  r  r  r  r  r
@@ -67,10 +66,10 @@ __global__ void batch_mul_direct_kernel3(uint32_t * A, uint32_t * B, uint32_t * 
                     standing_carry >>= 32;
                     standing_carry += running_carry;
                 }*/
-                for (int i = 0; i < BLOCK_SIZE; i += 8){
+                for (int i = 0; i < L_BLOCK; i += 8){
                     uint4 carryv1 = make_uint4(0, 0, 0, 0);
                     uint4 carryv2 = make_uint4(0, 0, 0, 0);
-                    for (int j = 0; j < BLOCK_SIZE; j += 8){
+                    for (int j = 0; j < L_BLOCK; j += 8){
                         uint4 av1 = make_uint4(a[i0 + i][threadIdx.x], a[i0 + i + 1][threadIdx.x], a[i0 + i + 2][threadIdx.x], a[i0 + i + 3][threadIdx.x]);
                         uint4 av2 = make_uint4(a[i0 + i + 4][threadIdx.x], a[i0 + i + 5][threadIdx.x], a[i0 + i + 6][threadIdx.x], a[i0 + i + 7][threadIdx.x]);
                         uint4 bv1 = make_uint4(b[j0 + j][threadIdx.x], b[j0 + j + 1][threadIdx.x], b[j0 + j + 2][threadIdx.x], b[j0 + j + 3][threadIdx.x]);
@@ -297,68 +296,69 @@ __global__ void batch_mul_direct_kernel3(uint32_t * A, uint32_t * B, uint32_t * 
                         r[i + j + 14][threadIdx.x] = r3v.z;
                         r[i + j + 15][threadIdx.x] = r3v.w;
                     }
-                    standing_carry += r[i + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + L_BLOCK - 1][threadIdx.x];
+                    r[i + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv1.x;
 
-                    standing_carry += r[i + 1 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 1 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 1 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 1 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv1.y;
 
-                    standing_carry += r[i + 2 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 2 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 2 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 2 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv1.z;
 
-                    standing_carry += r[i + 3 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 3 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 3 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 3 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv1.w;
 
-                    standing_carry += r[i + 4 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 4 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 4 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 4 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv2.x;
 
-                    standing_carry += r[i + 5 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 5 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 5 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 5 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv2.y;
 
-                    standing_carry += r[i + 6 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 6 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 6 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 6 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv2.z;
 
-                    standing_carry += r[i + 7 + BLOCK_SIZE - 1][threadIdx.x];
-                    r[i + 7 + BLOCK_SIZE - 1][threadIdx.x] = (uint32_t)standing_carry;
+                    standing_carry += r[i + 7 + L_BLOCK - 1][threadIdx.x];
+                    r[i + 7 + L_BLOCK - 1][threadIdx.x] = (uint32_t)standing_carry;
                     standing_carry >>= 32;
                     standing_carry += carryv2.w;
                 }
-                standing_carry += r[BLOCK_SIZE * 2 - 1][threadIdx.x];
-                r[BLOCK_SIZE * 2 - 1][threadIdx.x] = (uint32_t)standing_carry;
+                standing_carry += r[L_BLOCK * 2 - 1][threadIdx.x];
+                r[L_BLOCK * 2 - 1][threadIdx.x] = (uint32_t)standing_carry;
                 outer_carry[threadIdx.x] += standing_carry >> 32;
             }
             __syncthreads();
-            for (int i = 0; i < batch_len; i ++){
-                if (sum_ij + threadIdx.x < L * 2){
+
+            if (sum_ij + threadIdx.x < L * 2 && threadIdx.x < L_BLOCK){
+                for (int i = 0; i < batch_len; i ++){
                     ret[(idx0 + i) * (L * 2) + sum_ij + threadIdx.x] = r[threadIdx.x][i];
                 }
             }
             __syncthreads();
-            for (int i = 0; i < BLOCK_SIZE; i ++){
-                r[i][threadIdx.x] = r[i + BLOCK_SIZE][threadIdx.x];
-                r[i + BLOCK_SIZE][threadIdx.x] = 0;
+            for (int i = 0; i < L_BLOCK; i ++){
+                r[i][threadIdx.x] = r[i + L_BLOCK][threadIdx.x];
+                r[i + L_BLOCK][threadIdx.x] = 0;
             }
-            r[BLOCK_SIZE][threadIdx.x] = outer_carry[threadIdx.x];
+            r[L_BLOCK][threadIdx.x] = outer_carry[threadIdx.x];
             outer_carry[threadIdx.x] = 0;
         }
         __syncthreads();
-        for (int i = 0; i < batch_len; i ++){
-            if (L_down * 2 + BLOCK_SIZE + threadIdx.x < L * 2){
-                ret[(idx0 + i) * (L * 2) + L_down * 2 + BLOCK_SIZE + threadIdx.x] = r[threadIdx.x][i];
+        if (L_down * 2 + L_BLOCK + threadIdx.x < L * 2 && threadIdx.x < L_BLOCK){
+            for (int i = 0; i < batch_len; i ++){
+                ret[(idx0 + i) * (L * 2) + L_down * 2 + L_BLOCK + threadIdx.x] = r[threadIdx.x][i];
             }
         }
         __syncthreads();
@@ -366,19 +366,10 @@ __global__ void batch_mul_direct_kernel3(uint32_t * A, uint32_t * B, uint32_t * 
 }
 
 void batch_mul_direct(uint32_t * A, uint32_t * B, uint32_t * ret, int N, int L){
-    if (L < 52){
-        const int threads_per_block = 16;
-        int num_blocks = (N + threads_per_block - 1) / threads_per_block;
-        if (num_blocks >= 170 * 8) {
-            num_blocks = 170 * 8;
-        }
-        batch_mul_direct_kernel3<threads_per_block><<<num_blocks, threads_per_block>>>(A, B, ret, N, L);
-    }else{
-        const int threads_per_block = 32;
-        int num_blocks = (N + threads_per_block - 1) / threads_per_block;
-        if (num_blocks >= 170 * 8) {
-            num_blocks = 170 * 8;
-        }
-        batch_mul_direct_kernel3<threads_per_block><<<num_blocks, threads_per_block>>>(A, B, ret, N, L);
+    const int threads_per_block = 32;
+    int num_blocks = (N + threads_per_block - 1) / threads_per_block;
+    if (num_blocks >= 170 * 8) {
+        num_blocks = 170 * 8;
     }
+    batch_mul_direct_kernel3<16, threads_per_block><<<num_blocks, threads_per_block>>>(A, B, ret, N, L);
 }
