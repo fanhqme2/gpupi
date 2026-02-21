@@ -19,10 +19,7 @@ void generate_random_words(uint32_t* words, int L) {
 void words_to_mpz(mpz_t result, uint32_t* words, int L) {
     mpz_init(result);
     // Words are stored in little-endian order (word 0 is least significant)
-    for (int i = L - 1; i >= 0; i--) {
-        mpz_mul_2exp(result, result, 32);
-        mpz_add_ui(result, result, words[i]);
-    }
+    mpz_import(result, L, -1, sizeof(uint32_t), 0, 0, words);
 }
 
 // Test a single configuration
@@ -85,11 +82,7 @@ bool test_configuration(int N, int L, bool verbose = false) {
 
         // Get result from kernel and build mpz_t
         uint32_t* ret_words = &h_ret[i * L * 2];
-        mpz_set_ui(result, 0);
-        for (int j = L * 2 - 1; j >= 0; j--) {
-            mpz_mul_2exp(result, result, 32);
-            mpz_add_ui(result, result, ret_words[j]);
-        }
+        words_to_mpz(result, ret_words, L * 2);
 
         // Compare
         if (mpz_cmp(expected, result) != 0) {
