@@ -622,13 +622,15 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
     }
     
     int c_size = L_half * 2;
-    
-    uint32_t * A_combined = workspace;
-    uint32_t * B_combined = A_combined + (size_t)3 * N * L_half;
-    uint32_t * C_combined = B_combined + (size_t)3 * N * L_half;
-    uint32_t * next_workspace = C_combined + (size_t)3 * N * c_size;
 
+    uint32_t * C_combined;
+    
     if (L_half > BATCH_MUL_DIRECT_L_MAX){
+        uint32_t * A_combined = workspace;
+        uint32_t * B_combined = A_combined + (size_t)3 * N * L_half;
+        C_combined = B_combined + (size_t)3 * N * L_half;
+        uint32_t * next_workspace = C_combined + (size_t)3 * N * c_size;
+
         int num_blocks = (N + 32 - 1) / 32;
         if (num_blocks > 170 * 8) num_blocks = 170 * 8;
         batch_mul_toom22_transform_kernel<32, 32><<<dim3(num_blocks, 2, 1), 32>>>(
@@ -638,6 +640,8 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
         // Single recursive call with 3N instances
         batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * N, L_half);        
     }else{
+        C_combined = workspace;
+        
         batch_mul_toom22_directlv1_kernel<16, 32><<<dim3((N + 32 - 1) / 32, 3, 1), 32>>>(
             A, B, C_combined, N, L
         );
@@ -663,11 +667,26 @@ static size_t workspace_size_words_internal(int N, int L) {
         L_half = (L_half + 3) & ~3;
     }
     int c_size = L_half * 2;
+
+    size_t total = 0;
+
+    if (L_half > BATCH_MUL_DIRECT_L_MAX) {
+         total += (size_t)3 * N * L_half * 2; // A_combined + B_combined
+    }
+    total += (size_t)3 * N * c_size; // C_combined
     
-    size_t current = (size_t)3 * N * L_half + (size_t)3 * N * L_half + (size_t)3 * N * c_size;
-    size_t recursive = workspace_size_words_internal(3 * N, L_half);
-    
-    return current + recursive;
+    total += workspace_size_words_internal(3 * N, L_half);
+    return total;
+}
+
+static int get_N_max(int L){
+    if (L > 250) {
+        return 170 * 128 * 1;
+    } else if (L > 126) {
+        return 170 * 128 * 2;
+    } else {
+        return 170 * 128 * 2;
+    }
 }
 
 size_t batch_mul_toom22_workspace_size(int N, int L) {
@@ -675,14 +694,7 @@ size_t batch_mul_toom22_workspace_size(int N, int L) {
         return 0;
     }
     
-    int N_max;
-    if (L > 250) {
-        N_max = 170 * 128;
-    } else if (L > 126) {
-        N_max = 170 * 128 * 2;
-    } else {
-        N_max = 170 * 128 * 4;
-    }
+    int N_max = get_N_max(L);
     
     int chunk_N = (N < N_max) ? N : N_max;
     
@@ -694,14 +706,7 @@ void batch_mul_toom22(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * wor
         return;
     }
     
-    int N_max;
-    if (L > 250) {
-        N_max = 170 * 128;
-    } else if (L > 126) {
-        N_max = 170 * 128 * 2;
-    } else {
-        N_max = 170 * 128 * 4;
-    }
+    int N_max = get_N_max(L);
 
     for (int offset = 0; offset < N; offset += N_max) {
         int chunk_N = (offset + N_max <= N) ? N_max : (N - offset);
