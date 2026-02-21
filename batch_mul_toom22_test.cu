@@ -249,3 +249,22 @@ int main() {
 
     return all_passed ? 0 : 1;
 }
+
+/*
+Benchmarking L=65, N=1538461 (N*L=99999965)...
+  Average time: 5.919 ms
+  Multiplications per second: 259.92 million
+  Effective bandwidth: 135.16 GB/s
+Benchmarking L=121, N=826446 (N*L=99999966)...
+  Average time: 5.960 ms
+  Multiplications per second: 138.65 million
+  Effective bandwidth: 134.22 GB/s
+Benchmarking L=241, N=414937 (N*L=99999817)...
+  Average time: 13.601 ms
+  Multiplications per second: 30.51 million
+  Effective bandwidth: 58.82 GB/s
+Benchmarking L=481, N=207900 (N*L=99999900)...
+  Average time: 26.119 ms
+  Multiplications per second: 7.96 million
+  Effective bandwidth: 30.63 GB/s
+*/
