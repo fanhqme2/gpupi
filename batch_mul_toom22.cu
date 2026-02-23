@@ -14,53 +14,37 @@ inline int ceil_div(int a, int b) {
 // Transform kernel: decomposes inputs and prepares 3N interleaved arrays
 // L_split = ceil(L/2) is the actual split point
 // L_half = L_split + 1 is the buffer size for padded storage
-template<int L_BLOCK, int BLOCK_SIZE>
+template<int BLOCK_SIZE>
 __global__ void batch_mul_toom22_transform_kernel(
     const uint32_t * A, const uint32_t * B,
     uint32_t * A_out, uint32_t * B_out,
     int N, int L, int L_split, int L_half
 ) {
-    const uint32_t * src;
-    uint32_t * dst;
-    if (blockIdx.y == 0) {
-        src = A;
-        dst = A_out;
-    } else {
-        src = B;
-        dst = B_out;
-    }
-    // L_split = ceil(L/2)
-    // L_half = L_split + 1 (padded size)
-    int L_lower = L_split;  // = ceil(L/2)
-    int L_upper = L / 2;    // = floor(L/2)
-    __shared__ uint32_t a0[L_BLOCK][BLOCK_SIZE + 1];
-    __shared__ uint32_t a1[L_BLOCK][BLOCK_SIZE + 1];
-    __shared__ uint32_t a_sum[L_BLOCK][BLOCK_SIZE + 1];
-    for (int idx0 = blockIdx.x * BLOCK_SIZE; idx0 < N; idx0 += BLOCK_SIZE * gridDim.x) {
-        uint32_t carry = 0;
-        int batch_len = min(BLOCK_SIZE, N - idx0);
-        for (int j0 = 0; j0 < L_half; j0 += L_BLOCK){
-            for (int j = j0 + threadIdx.x; j < j0 + L_BLOCK && j < L_half; j += BLOCK_SIZE){
-                for (int i = 0; i < batch_len; i ++){
-                    a1[j - j0][i] = (j < L_lower) ? src[(idx0 + i) * L + j] : 0;
-                    a0[j - j0][i] = (j < L_upper) ? src[(idx0 + i) * L + j + L_lower] : 0;
-                }
-            }
-            __syncthreads();
-            add_cc(carry, 0xFFFFFFFF);
-            for (int j = 0; j < L_BLOCK; j++){
-                a_sum[j][threadIdx.x] = addc_cc(a0[j][threadIdx.x], a1[j][threadIdx.x]);
-            }
-            carry = addc(0, 0);
-            __syncthreads();
-            for (int j = j0 + threadIdx.x; j < j0 + L_BLOCK && j < L_half; j += BLOCK_SIZE){
-                for (int i = 0; i < batch_len; i ++){
-                    dst[(idx0 + i) * L_half + j] = a0[j - j0][i];
-                    dst[(N + idx0 + i) * L_half + j] = a1[j - j0][i];
-                    dst[(2 * N + idx0 + i) * L_half + j] = a_sum[j - j0][i];
-                }
-            }
-            __syncthreads();
+    const uint32_t * src = (blockIdx.y == 0) ? A : B;
+    uint32_t * dst = (blockIdx.y == 0) ? A_out : B_out;
+    int j_idx = (threadIdx.y * BLOCK_SIZE + threadIdx.x) * 2;
+    __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 4 / BLOCK_SIZE + 1];
+    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
+        uint32_t r0_value, r1_value;
+        uint32_t c0_value, c1_value;
+        r0_value = (j_idx < L_split) ? src[idx * L + j_idx] : 0;
+        r1_value = (j_idx + 1 < L_split) ? src[idx * L + j_idx + 1] : 0;
+        c0_value = (j_idx + L_split < L) ? src[idx * L + j_idx + L_split] : 0;
+        c1_value = (j_idx + L_split + 1 < L) ? src[idx * L + j_idx + L_split + 1] : 0;
+        if (j_idx < L_half){
+            dst[idx * L_half + j_idx] = c0_value;
+            dst[(N + idx) * L_half + j_idx] = r0_value;
+        }
+        if (j_idx + 1 < L_half){
+            dst[idx * L_half + j_idx + 1] = c1_value;
+            dst[(N + idx) * L_half + j_idx + 1] = r1_value;
+        }
+        batch_mul_add_64_all_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value, carry_prop);
+        if (j_idx < L_half){
+            dst[(N * 2 + idx) * L_half + j_idx] = r0_value;
+        }
+        if (j_idx + 1 < L_half){
+            dst[(N * 2 + idx) * L_half + j_idx + 1] = r1_value;
         }
     }
 }
@@ -421,7 +405,8 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
 
         int num_blocks = (N + 32 - 1) / 32;
         if (num_blocks > 170 * 8) num_blocks = 170 * 8;
-        batch_mul_toom22_transform_kernel<32, 32><<<dim3(num_blocks, 2, 1), 32>>>(
+        int num_warps = (L_half + 64 - 1) / 64;
+        batch_mul_toom22_transform_kernel<32><<<dim3(num_blocks, 2, 1), dim3(32, num_warps, 1)>>>(
             A, B, A_combined, B_combined, N, L, L_split, L_half
         );
         
