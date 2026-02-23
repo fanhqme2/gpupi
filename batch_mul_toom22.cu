@@ -5,51 +5,10 @@
 #include "batch_mul_toom22.h"
 #include "batch_mul_direct.h"
 #include "batch_mul_8x8_block.h"
+#include "batch_mul_addsub_warp.h"
 
 inline int ceil_div(int a, int b) {
     return (a + b - 1) / b;
-}
-
-// Add with carry-out (sets carry flag)
-__device__ __forceinline__ uint32_t add_cc(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm volatile ("add.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
-    return r;
-}
-
-// Add with carry-in and carry-out (uses and sets carry flag)
-__device__ __forceinline__ uint32_t addc_cc(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm volatile ("addc.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
-    return r;
-}
-
-// Add with carry-in (uses carry flag, no output carry)
-__device__ __forceinline__ uint32_t addc(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm volatile ("addc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
-    return r;
-}
-
-// Subtract with borrow-out (sets carry flag)
-__device__ __forceinline__ uint32_t sub_cc(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm volatile ("sub.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
-    return r;
-}
-
-// Subtract with borrow-in and borrow-out (uses and sets carry flag)
-__device__ __forceinline__ uint32_t subc_cc(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm volatile ("subc.cc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
-    return r;
-}
-
-// Subtract with borrow-in (uses carry flag, no output borrow)
-__device__ __forceinline__ uint32_t subc(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm volatile ("subc.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b));
-    return r;
 }
 
 // Transform kernel: decomposes inputs and prepares 3N interleaved arrays
@@ -229,25 +188,8 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
                 c0_value = b[1][threadIdx.x * 2 + 0];
                 c1_value = b[1][threadIdx.x * 2 + 1];
             }
-            r0_value = add_cc(r0_value, c0_value);
-            r1_value = addc_cc(r1_value, c1_value);
-            uint32_t carry_state = addc(0, 0);
-            add_cc(1, r0_value);
-            addc_cc(0, r1_value);
-            carry_state = addc(carry_state, carry_state);
-            // carry_state:  0   no carry    2  carry    1  depends on previous
-            for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
-                uint32_t prev_carry = __shfl_up_sync(warp_mask, carry_state, delta, BLOCK_SIZE);
-                if (carry_state == 1){
-                    carry_state = prev_carry && (threadIdx.x >= delta);
-                }
-            }
-            carry_state = __shfl_up_sync(warp_mask, carry_state, 1, BLOCK_SIZE);
-            if (threadIdx.x == 0){
-                carry_state = 0;
-            }
-            r0_value = add_cc(r0_value, carry_state >> 1);
-            r1_value = addc_cc(r1_value, 0);
+
+            batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
             if (threadIdx.y == 0){
                 if (threadIdx.x * 2 + 0 < L){
                     a[2][threadIdx.x * 2 + 0] = r0_value;
@@ -307,25 +249,9 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
                 }
             }
             int L2 = (L + 1) & -2;
-            r0_value = add_cc(r0_value, c0_value);
-            r1_value = addc_cc(r1_value, c1_value);
-            uint32_t carry_state = addc(0, 0);
-            add_cc(1, r0_value);
-            addc_cc(0, r1_value);
-            carry_state = addc(carry_state, carry_state);
-            // carry_state:  0   no carry    2  carry    1  depends on previous
-            for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
-                uint32_t prev_carry = __shfl_up_sync(warp_mask, carry_state, delta, BLOCK_SIZE);
-                if (carry_state == 1){
-                    carry_state = prev_carry && (threadIdx.x >= delta);
-                }
-            }
-            carry_state = __shfl_up_sync(warp_mask, carry_state, 1, BLOCK_SIZE);
-            if (threadIdx.x == 0){
-                carry_state = 0;
-            }
-            r0_value = add_cc(r0_value, carry_state >> 1);
-            r1_value = addc_cc(r1_value, 0);
+
+            batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
+
             r[threadIdx.y][i0 + threadIdx.x * 2 + L2] = r0_value;
             r[threadIdx.y][i0 + threadIdx.x * 2 + 1 + L2] = r1_value;
         }
@@ -337,6 +263,21 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
             uint32_t borrow_state;
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
+
+            // do not use the batch_mul_sub_64_multi_warp function as it is slower
+            /*if (threadIdx.y < 2){
+                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+                c0_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                c1_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+            }
+            batch_mul_sub_64_multi_warp<BLOCK_SIZE, 2>(r0_value, r1_value, c0_value, c1_value, carry_prop);
+            if (threadIdx.y < 2){
+                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L * 2){
+                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
+                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
+                }
+            }*/
             if (threadIdx.y < 2){
                 r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
                 r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
@@ -411,56 +352,7 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
             c1_value = 0;
         }
 
-        r0_value = add_cc(r0_value, c0_value);
-        r1_value = addc_cc(r1_value, c1_value);
-
-        uint32_t carry_state = addc(0, 0);
-        add_cc(1, r0_value);
-        addc_cc(0, r1_value);
-        carry_state = addc(carry_state, carry_state);
-
-        // carry_state:  0   no carry    2  carry    1  depends on previous
-        for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
-            uint32_t prev_carry = __shfl_up_sync(warp_mask, carry_state, delta, BLOCK_SIZE);
-            if (carry_state == 1){
-                carry_state = prev_carry;
-            }
-        }
-        if (threadIdx.x == BLOCK_SIZE - 1){
-            carry_prop[threadIdx.y] = carry_state;
-        }
-        __syncthreads();
-
-        if (threadIdx.y == 0 && threadIdx.x == 0){
-            if (carry_prop[0] == 1){
-                carry_prop[0] = 0;
-            }
-            if (carry_prop[1] == 1){
-                carry_prop[1] = carry_prop[0];
-            }
-            if (carry_prop[2] == 1){
-                carry_prop[2] = carry_prop[1];
-            }
-        }
-
-        __syncthreads();
-        if (carry_state == 1){
-            if (threadIdx.y > 0){
-                carry_state = carry_prop[threadIdx.y - 1];
-            }else{
-                carry_state = 0;
-            }
-        }
-        carry_state = __shfl_up_sync(warp_mask, carry_state, 1, BLOCK_SIZE);
-        if (threadIdx.x == 0){
-            if (threadIdx.y == 0){
-                carry_state = 0;
-            }else{
-                carry_state = carry_prop[threadIdx.y - 1];
-            }
-        }
-        r0_value = add_cc(r0_value, carry_state >> 1);
-        r1_value = addc_cc(r1_value, 0);
+        batch_mul_add_64_multi_warp<BLOCK_SIZE, 3>(r0_value, r1_value, c0_value, c1_value, carry_prop);
 
         if (threadIdx.y == 0){
             if (threadIdx.x * 2 < L_split){
