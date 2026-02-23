@@ -499,10 +499,6 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
     }
 }
 
-// Forward declaration
-static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret, 
-    uint32_t * workspace, int N, int L);
-
 // Internal recursive function
 static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret, 
     uint32_t * workspace, int N, int L) {
