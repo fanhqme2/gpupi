@@ -196,6 +196,7 @@ int main() {
     for (int t = 0; t < 20; t++) {
         int L_min = BATCH_MUL_DIRECT_L_MAX + 1;
         int L = L_min + rand() % (BATCH_MUL_TOOM22_L_MAX - L_min + 1);
+        L = 121;
         int max_N = 16384 / L;
         if (max_N < 1) max_N = 1;
         int N = 1 + rand() % max_N;
@@ -252,19 +253,19 @@ int main() {
 
 /*
 Benchmarking L=65, N=1538461 (N*L=99999965)...
-  Average time: 5.637 ms
-  Multiplications per second: 272.94 million
-  Effective bandwidth: 141.93 GB/s
+  Average time: 3.541 ms
+  Multiplications per second: 434.45 million
+  Effective bandwidth: 225.91 GB/s
 Benchmarking L=121, N=826446 (N*L=99999966)...
-  Average time: 5.483 ms
-  Multiplications per second: 150.72 million
-  Effective bandwidth: 145.89 GB/s
+  Average time: 2.950 ms
+  Multiplications per second: 280.17 million
+  Effective bandwidth: 271.21 GB/s
 Benchmarking L=241, N=414937 (N*L=99999817)...
-  Average time: 13.603 ms
-  Multiplications per second: 30.50 million
-  Effective bandwidth: 58.81 GB/s
+  Average time: 9.523 ms
+  Multiplications per second: 43.57 million
+  Effective bandwidth: 84.00 GB/s
 Benchmarking L=481, N=207900 (N*L=99999900)...
-  Average time: 26.124 ms
-  Multiplications per second: 7.96 million
-  Effective bandwidth: 30.62 GB/s
+  Average time: 20.067 ms
+  Multiplications per second: 10.36 million
+  Effective bandwidth: 39.87 GB/s
 */

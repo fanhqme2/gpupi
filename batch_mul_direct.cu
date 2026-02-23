@@ -258,7 +258,7 @@ __global__ void batch_mul_direct_kernel5(uint32_t * A, uint32_t * B, uint32_t * 
             for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
                 int prev_carry = __shfl_up_sync(warp_mask, carry_state, delta, BLOCK_SIZE);
                 if (carry_state == 1){
-                    carry_state = prev_carry && (threadIdx.x >= delta);
+                    carry_state = (threadIdx.x >= delta) ? prev_carry : 0;
                 }
             }
             carry_state = __shfl_up_sync(warp_mask, carry_state, 1, BLOCK_SIZE);
