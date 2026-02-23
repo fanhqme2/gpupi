@@ -50,12 +50,12 @@ __global__ void batch_mul_toom22_transform_kernel(
 }
 
 template<int BLOCK_SIZE>
-__global__ void batch_mul_toom22_reconstruct_kernel2(
+__global__ void batch_mul_toom22_reconstruct_kernel(
     uint32_t * ret,
     const uint32_t * C,
     int N, int L_total, int L_split, int L_half
 ) {
-    __shared__ uint32_t r[3][256];
+    __shared__ uint32_t r[3][512];
     __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 2 / BLOCK_SIZE + 1];
     int warp_per_group = (L_half + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
     int j_idx = (threadIdx.y % warp_per_group) * BLOCK_SIZE + threadIdx.x;
@@ -67,10 +67,12 @@ __global__ void batch_mul_toom22_reconstruct_kernel2(
             r[1][j] = C[(N + idx) * L_half * 2 + j];
             r[2][j] = C[(N * 2 + idx) * L_half * 2 + j];
         }
+        __syncthreads();
+
         for (int si = 0; si < 2; si ++){
             uint32_t borrow_state;
             uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
+            uint32_t c0_value=1, c1_value;
             if (threadIdx.y < warp_per_group * 2){
                 r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
                 r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
@@ -186,82 +188,6 @@ __global__ void batch_mul_toom22_reconstruct_kernel2(
             }
         }
         __syncthreads();
-    }
-}
-
-
-// Reconstruct kernel: combines partial results
-// L_split = ceil(L/2) is the actual split point (shift amount)
-// L_half = L_split + 1 is the buffer size
-template<int L_BLOCK, int BLOCK_SIZE>
-__global__ void batch_mul_toom22_reconstruct_kernel(
-    uint32_t * ret,
-    const uint32_t * C,
-    int N, int L, int L_split, int L_half
-) {
-    const uint32_t * C00 = C;
-    const uint32_t * C11 = C + N * L_half * 2;
-    const uint32_t * C01 = C + 2 * N * L_half * 2;
-    __shared__ uint32_t part1[L_BLOCK][BLOCK_SIZE + 1];
-    __shared__ uint32_t part2[L_BLOCK][BLOCK_SIZE + 1];
-    __shared__ uint32_t part3[L_BLOCK][BLOCK_SIZE + 1];
-    __shared__ uint32_t part4[L_BLOCK][BLOCK_SIZE + 1];
-    for (int idx0 = blockIdx.x * BLOCK_SIZE; idx0 < N; idx0 += BLOCK_SIZE * gridDim.x) {
-        int batch_len = min(BLOCK_SIZE, N - idx0);
-        uint32_t carry = 0;
-        uint32_t borrow_0 = 0;
-        uint32_t borrow_1 = 0;
-        for (int j0 = 0; j0 < L * 2; j0 += L_BLOCK){
-            for (int j = j0 + threadIdx.x; j < j0 + L_BLOCK && j < L * 2; j += BLOCK_SIZE){
-                for (int i = 0; i < batch_len; i ++){
-                    part1[j - j0][i] = (
-                        (j < L_split * 2) ?
-                        C11[(idx0 + i) * L_half * 2 + j] : 
-                        C00[(idx0 + i) * L_half * 2 + j - L_split * 2]
-                    );
-                    part2[j - j0][i] = (
-                        (L_split <= j && j < L_split + L_half * 2) ?
-                        C01[(idx0 + i) * L_half * 2 + j - L_split] :
-                        0
-                    );
-                    part3[j - j0][i] = (
-                        (L_split <= j && j < L_split + L_half * 2) ?
-                        C00[(idx0 + i) * L_half * 2 + j - L_split] :
-                        0
-                    );
-                    part4[j - j0][i] = (
-                        (L_split <= j && j < L_split + L_half * 2) ?
-                        C11[(idx0 + i) * L_half * 2 + j - L_split] :
-                        0
-                    );
-                }
-            }
-            __syncthreads();
-            sub_cc(0, borrow_0);
-            for (int i = 0; i < L_BLOCK; i ++){
-                part2[i][threadIdx.x] = subc_cc(part2[i][threadIdx.x], part3[i][threadIdx.x]);
-            }
-            borrow_0 = -subc(0, 0);
-
-            sub_cc(0, borrow_1);
-            for (int i = 0; i < L_BLOCK; i ++){
-                part2[i][threadIdx.x] = subc_cc(part2[i][threadIdx.x], part4[i][threadIdx.x]);
-            }
-            borrow_1 = -subc(0, 0);
-
-            add_cc(carry, 0xFFFFFFFF);
-            for (int i = 0; i < L_BLOCK; i ++){
-                part1[i][threadIdx.x] = addc_cc(part1[i][threadIdx.x], part2[i][threadIdx.x]);
-            }
-            carry = addc(0, 0);
-            __syncthreads();
-            for (int j = j0 + threadIdx.x; j < j0 + L_BLOCK && j < L * 2; j += BLOCK_SIZE){
-                for (int i = 0; i < batch_len; i ++){
-                    ret[(idx0 + i) * (L * 2) + j] = part1[j - j0][i];
-                }
-            }
-            __syncthreads();
-        }
     }
 }
 
@@ -539,9 +465,10 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
         // Single recursive call with 3N instances
         batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * N, L_half);     
 
-        int num_blocks_2 = (N + 16 - 1) / 16;
-        if (num_blocks_2 > 170 * 16) num_blocks_2 = 170 * 16;
-        batch_mul_toom22_reconstruct_kernel<16, 16><<<num_blocks_2, 16>>>(
+        int num_blocks_2 = N;
+        if (num_blocks_2 > 65536) num_blocks_2 = 65536;
+        int num_warps_2 = (L_half + 64 - 1) / 64;
+        batch_mul_toom22_reconstruct_kernel<32><<<num_blocks_2, dim3(32, num_warps_2 * 3, 1)>>>(
             ret, C_combined, N, L, L_split, L_half
         );
 

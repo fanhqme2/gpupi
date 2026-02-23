@@ -218,11 +218,11 @@ int main() {
     printf("\n");
 
     // Large range tests
-    printf("Large range tests (N*L <= 1e7, L > %d):\n", BATCH_MUL_DIRECT_L_MAX);
+    printf("Large range tests (N*L <= 2e7, L > %d):\n", BATCH_MUL_DIRECT_L_MAX);
     for (int t = 0; t < 3; t++) {
         int L_min = BATCH_MUL_DIRECT_L_MAX + 1;
         int L = L_min + rand() % (BATCH_MUL_TOOM22_L_MAX - L_min + 1);
-        int max_N = 1e7 / L;
+        int max_N = 2e7 / L;
         if (max_N < 1) max_N = 1;
         int N = max_N;
         bool pass = test_configuration(N, L, true);
