@@ -288,8 +288,8 @@ void batch_mul_direct(uint32_t * A, uint32_t * B, uint32_t * ret, int N, int L){
         batch_mul_direct_kernel3<16, threads_per_block><<<num_blocks, threads_per_block>>>(A, B, ret, N, L);
     }else{
         const int threads_per_block = 32;
-        int num_blocks = (N + threads_per_block - 1) / threads_per_block;
-        num_blocks = min(num_blocks, 170 * 512 / threads_per_block);
+        int num_blocks = N;
+        num_blocks = min(num_blocks, 65536);
         batch_mul_direct_kernel5<threads_per_block><<<num_blocks, threads_per_block>>>(A, B, ret, N, L);
     }
 }

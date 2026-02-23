@@ -221,55 +221,55 @@ int main() {
 
 /*
 Benchmarking L=16, N=6250000 (N*L=100000000)...
-  Average time: 1.177 ms
-  Multiplications per second: 5311.72 million
-  Effective bandwidth: 679.90 GB/s
+  Average time: 1.180 ms
+  Multiplications per second: 5295.12 million
+  Effective bandwidth: 677.78 GB/s
 Benchmarking L=20, N=5000000 (N*L=100000000)...
-  Average time: 2.020 ms
-  Multiplications per second: 2475.26 million
-  Effective bandwidth: 396.04 GB/s
+  Average time: 2.017 ms
+  Multiplications per second: 2479.25 million
+  Effective bandwidth: 396.68 GB/s
 Benchmarking L=24, N=4166666 (N*L=99999984)...
-  Average time: 1.730 ms
-  Multiplications per second: 2409.06 million
-  Effective bandwidth: 462.54 GB/s
+  Average time: 1.734 ms
+  Multiplications per second: 2402.71 million
+  Effective bandwidth: 461.32 GB/s
 Benchmarking L=28, N=3571428 (N*L=99999984)...
-  Average time: 1.570 ms
-  Multiplications per second: 2274.79 million
-  Effective bandwidth: 509.55 GB/s
+  Average time: 1.571 ms
+  Multiplications per second: 2273.31 million
+  Effective bandwidth: 509.22 GB/s
 Benchmarking L=32, N=3125000 (N*L=100000000)...
-  Average time: 1.367 ms
-  Multiplications per second: 2286.29 million
-  Effective bandwidth: 585.29 GB/s
+  Average time: 1.360 ms
+  Multiplications per second: 2298.56 million
+  Effective bandwidth: 588.43 GB/s
 Benchmarking L=36, N=2777777 (N*L=99999972)...
-  Average time: 1.949 ms
-  Multiplications per second: 1424.88 million
-  Effective bandwidth: 410.36 GB/s
+  Average time: 1.610 ms
+  Multiplications per second: 1725.27 million
+  Effective bandwidth: 496.88 GB/s
 Benchmarking L=40, N=2500000 (N*L=100000000)...
-  Average time: 2.031 ms
-  Multiplications per second: 1230.64 million
-  Effective bandwidth: 393.80 GB/s
+  Average time: 1.617 ms
+  Multiplications per second: 1546.31 million
+  Effective bandwidth: 494.82 GB/s
 Benchmarking L=44, N=2272727 (N*L=99999988)...
-  Average time: 1.931 ms
-  Multiplications per second: 1176.72 million
-  Effective bandwidth: 414.21 GB/s
+  Average time: 1.591 ms
+  Multiplications per second: 1428.21 million
+  Effective bandwidth: 502.73 GB/s
 Benchmarking L=48, N=2083333 (N*L=99999984)...
-  Average time: 1.871 ms
-  Multiplications per second: 1113.78 million
-  Effective bandwidth: 427.69 GB/s
+  Average time: 1.552 ms
+  Multiplications per second: 1342.21 million
+  Effective bandwidth: 515.41 GB/s
 Benchmarking L=52, N=1923076 (N*L=99999952)...
-  Average time: 1.897 ms
-  Multiplications per second: 1013.48 million
-  Effective bandwidth: 421.61 GB/s
+  Average time: 1.577 ms
+  Multiplications per second: 1219.78 million
+  Effective bandwidth: 507.43 GB/s
 Benchmarking L=56, N=1785714 (N*L=99999984)...
-  Average time: 1.883 ms
-  Multiplications per second: 948.48 million
-  Effective bandwidth: 424.92 GB/s
+  Average time: 1.544 ms
+  Multiplications per second: 1156.29 million
+  Effective bandwidth: 518.02 GB/s
 Benchmarking L=60, N=1666666 (N*L=99999960)...
-  Average time: 1.812 ms
-  Multiplications per second: 919.91 million
-  Effective bandwidth: 441.56 GB/s
+  Average time: 1.533 ms
+  Multiplications per second: 1087.12 million
+  Effective bandwidth: 521.82 GB/s
 Benchmarking L=64, N=1562500 (N*L=100000000)...
-  Average time: 1.736 ms
-  Multiplications per second: 900.29 million
-  Effective bandwidth: 460.95 GB/s
+  Average time: 1.482 ms
+  Multiplications per second: 1054.16 million
+  Effective bandwidth: 539.73 GB/s
 */

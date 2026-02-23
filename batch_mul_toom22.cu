@@ -49,6 +49,147 @@ __global__ void batch_mul_toom22_transform_kernel(
     }
 }
 
+template<int BLOCK_SIZE>
+__global__ void batch_mul_toom22_reconstruct_kernel2(
+    uint32_t * ret,
+    const uint32_t * C,
+    int N, int L_total, int L_split, int L_half
+) {
+    __shared__ uint32_t r[3][256];
+    __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 2 / BLOCK_SIZE + 1];
+    int warp_per_group = (L_half + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
+    int j_idx = (threadIdx.y % warp_per_group) * BLOCK_SIZE + threadIdx.x;
+    const unsigned int warp_mask = (1ull << BLOCK_SIZE) - 1;
+
+    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
+        for (int j = threadIdx.x + threadIdx.y * BLOCK_SIZE; j < L_half * 2; j += blockDim.y * BLOCK_SIZE){
+            r[0][j] = C[idx * L_half * 2 + j];
+            r[1][j] = C[(N + idx) * L_half * 2 + j];
+            r[2][j] = C[(N * 2 + idx) * L_half * 2 + j];
+        }
+        for (int si = 0; si < 2; si ++){
+            uint32_t borrow_state;
+            uint32_t r0_value, r1_value;
+            uint32_t c0_value, c1_value;
+            if (threadIdx.y < warp_per_group * 2){
+                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+                c0_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                c1_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+                r0_value = sub_cc(r0_value, c0_value);
+                r1_value = subc_cc(r1_value, c1_value);
+                borrow_state = -subc(0, 0); // 0 or 1
+                sub_cc(r0_value, 1);
+                subc_cc(r1_value, 0);
+                borrow_state = (borrow_state << 1) -subc(0, 0);
+                // borrow_state:  0   no borrow    2  borrow    1  depends on previous
+                for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
+                    uint32_t prev_borrow = __shfl_up_sync(warp_mask, borrow_state, delta, BLOCK_SIZE);
+                    if (borrow_state == 1){
+                        borrow_state = prev_borrow;
+                    }
+                }
+                if (threadIdx.x == BLOCK_SIZE - 1){
+                    carry_prop[threadIdx.y] = borrow_state;
+                }
+            }
+            __syncthreads();
+            if (threadIdx.y == 0 && threadIdx.x == 0){
+                if (carry_prop[0] == 1){
+                    carry_prop[0] = 0;
+                }
+                for (int i = 1; i < warp_per_group * 2 - 1; i++){
+                    if (carry_prop[i] == 1){
+                        carry_prop[i] = carry_prop[i - 1];
+                    }
+                }
+            }
+            __syncthreads();
+            if (threadIdx.y < warp_per_group * 2){
+                if (borrow_state == 1){
+                    if (threadIdx.y > 0){
+                        borrow_state = carry_prop[threadIdx.y - 1];
+                    }else{
+                        borrow_state = 0;
+                    }
+                }
+                borrow_state = __shfl_up_sync(warp_mask, borrow_state, 1, BLOCK_SIZE);
+                if (threadIdx.x == 0){
+                    if (threadIdx.y == 0){
+                        borrow_state = 0;
+                    }else{
+                        borrow_state = carry_prop[threadIdx.y - 1];
+                    }
+                }
+                r0_value = sub_cc(r0_value, borrow_state >> 1);
+                r1_value = subc_cc(r1_value, 0);
+                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L_half * 2){
+                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
+                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
+                }
+            }
+            __syncthreads();
+        }
+
+        uint32_t r0_value, r1_value;
+        uint32_t c0_value, c1_value;
+        if (threadIdx.y < warp_per_group){
+            r0_value = (j_idx * 2 < L_split) ? r[1][j_idx * 2 + L_split] : 0;
+            r1_value = (j_idx * 2 + 1 < L_split) ? r[1][j_idx * 2 + 1 + L_split] : 0;
+            c0_value = (j_idx * 2 < L_split) ? r[2][j_idx * 2] : 0xffffffff;
+            c1_value = (j_idx * 2 + 1 < L_split) ? r[2][j_idx * 2 + 1] : 0xffffffff;
+        }else if (threadIdx.y < warp_per_group * 2){
+            r0_value = (j_idx * 2 < L_half * 2 - L_split) ? r[2][j_idx * 2 + L_split] : 0;
+            r1_value = (j_idx * 2 + 1 < L_half * 2 - L_split) ? r[2][j_idx * 2 + 1 + L_split] : 0;
+            c0_value = (j_idx * 2 < L_half * 2 - L_split) ? r[0][j_idx * 2] : 0xffffffff;
+            c1_value = (j_idx * 2 + 1 < L_half * 2 - L_split) ? r[0][j_idx * 2 + 1] : 0xffffffff;
+        }else{
+            r0_value = (j_idx * 2 < L_total * 2 - L_split - L_half * 2) ? r[0][j_idx * 2 - L_split + L_half * 2] : 0;
+            r1_value = (j_idx * 2 + 1 < L_total * 2 - L_split - L_half * 2) ? r[0][j_idx * 2 + 1 - L_split + L_half * 2] : 0;
+            c0_value = 0;
+            c1_value = 0;
+        }
+
+        batch_mul_add_64_all_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value, carry_prop);
+
+        if (threadIdx.y < warp_per_group){
+            if (j_idx * 2 < L_split){
+                r[1][j_idx * 2 + L_split] = r0_value;
+            }
+            if (j_idx * 2 + 1 < L_split){
+                r[1][j_idx * 2 + 1 + L_split] = r1_value;
+            }
+        }else if (threadIdx.y < warp_per_group * 2){
+            if (j_idx * 2 < L_half * 2 - L_split){
+                r[0][j_idx * 2] = r0_value;
+            }
+            if (j_idx * 2 + 1 < L_half * 2 - L_split){
+                r[0][j_idx * 2 + 1] = r1_value;
+            }
+        }else{
+            if (j_idx * 2 < L_total * 2 - L_split - L_half * 2){
+                r[0][j_idx * 2 - L_split + L_half * 2] = r0_value;
+            }
+            if (j_idx * 2 + 1 < L_total * 2 - L_split - L_half * 2){
+                r[0][j_idx * 2 + 1 - L_split + L_half * 2] = r1_value;
+            }
+        }
+        __syncthreads();
+
+        if (threadIdx.y < warp_per_group){
+            for (int j = j_idx; j < L_split * 2; j += BLOCK_SIZE * warp_per_group){
+                ret[idx * L_total * 2 + j] = r[1][j];
+            }
+        }else if (threadIdx.y < warp_per_group * 2){
+            for (int j = j_idx; j < L_total * 2 - L_split * 2; j += BLOCK_SIZE * warp_per_group){
+                ret[idx * L_total * 2 + L_split * 2 + j] = r[0][j];
+            }
+        }
+        __syncthreads();
+    }
+}
+
+
 // Reconstruct kernel: combines partial results
 // L_split = ceil(L/2) is the actual split point (shift amount)
 // L_half = L_split + 1 is the buffer size
@@ -296,7 +437,6 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
             }
             __syncthreads();
         }
-        __syncthreads();
 
         // add r[2] back to r[1] and r[0]
         // r[1] : [0 .. L_split)  [L_split .. L_split * 2)
@@ -389,8 +529,8 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
         C_combined = B_combined + (size_t)3 * N * L_half;
         uint32_t * next_workspace = C_combined + (size_t)3 * N * c_size;
 
-        int num_blocks = (N + 32 - 1) / 32;
-        if (num_blocks > 170 * 8) num_blocks = 170 * 8;
+        int num_blocks = N;
+        if (num_blocks > 65536) num_blocks = 65536;
         int num_warps = (L_half + 64 - 1) / 64;
         batch_mul_toom22_transform_kernel<32><<<dim3(num_blocks, 2, 1), dim3(32, num_warps, 1)>>>(
             A, B, A_combined, B_combined, N, L, L_split, L_half
@@ -398,14 +538,16 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
         
         // Single recursive call with 3N instances
         batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * N, L_half);     
+
         int num_blocks_2 = (N + 16 - 1) / 16;
         if (num_blocks_2 > 170 * 16) num_blocks_2 = 170 * 16;
         batch_mul_toom22_reconstruct_kernel<16, 16><<<num_blocks_2, 16>>>(
             ret, C_combined, N, L, L_split, L_half
-        );   
+        );
+
     }else{
-        int num_blocks = (N + 32 - 1) / 32;
-        if (num_blocks > 170 * 16) num_blocks = 170 * 16;
+        int num_blocks = N;
+        if (num_blocks > 65536) num_blocks = 65536;
         batch_mul_toom22_directlv1_kernel<32><<<num_blocks, dim3(32, 3, 1)>>>(
             A, B, ret, N, L
         );
@@ -439,13 +581,13 @@ static size_t workspace_size_words_internal(int N, int L) {
     return total;
 }
 
-static int get_N_max(int L){
+static int get_N_max(int N, int L){
     if (L > 250) {
-        return 170 * 128 * 1;
+        return min(170 * 128 * 1, N);
     } else if (L > 126) {
-        return 170 * 128 * 2;
+        return min(170 * 128 * 2, N);
     } else {
-        return 170 * 128 * 128; // unlimitted as we do not need workspace
+        return N; // unlimitted as we do not need workspace
     }
 }
 
@@ -454,9 +596,7 @@ size_t batch_mul_toom22_workspace_size(int N, int L) {
         return 0;
     }
     
-    int N_max = get_N_max(L);
-    
-    int chunk_N = (N < N_max) ? N : N_max;
+    int chunk_N = get_N_max(N, L);
     
     return workspace_size_words_internal(chunk_N, L) * sizeof(uint32_t);
 }
@@ -466,7 +606,7 @@ void batch_mul_toom22(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * wor
         return;
     }
     
-    int N_max = get_N_max(L);
+    int N_max = get_N_max(N, L);
 
     for (int offset = 0; offset < N; offset += N_max) {
         int chunk_N = (offset + N_max <= N) ? N_max : (N - offset);
