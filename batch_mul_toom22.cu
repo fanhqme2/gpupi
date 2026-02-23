@@ -248,20 +248,6 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
 
-            // do not use the batch_mul_sub_64_multi_warp function as it is slower
-            /*if (threadIdx.y < 2){
-                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                c0_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                c1_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-            }
-            batch_mul_sub_64_multi_warp<BLOCK_SIZE, 2>(r0_value, r1_value, c0_value, c1_value, carry_prop);
-            if (threadIdx.y < 2){
-                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L * 2){
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
-                }
-            }*/
             if (threadIdx.y < 2){
                 r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
                 r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
@@ -336,7 +322,7 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
             c1_value = 0;
         }
 
-        batch_mul_add_64_multi_warp<BLOCK_SIZE, 3>(r0_value, r1_value, c0_value, c1_value, carry_prop);
+        batch_mul_add_64_all_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value, carry_prop);
 
         if (threadIdx.y == 0){
             if (threadIdx.x * 2 < L_split){
