@@ -309,60 +309,34 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
         __syncthreads();
         
         // r[2] -= r[0] + r[1]
-        __shared__ uint32_t carry_prop[3];
-        for (int si = 0; si < 2; si ++){
-            uint32_t borrow_state;
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
-
-            if (threadIdx.y < 2){
-                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                c0_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                c1_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                r0_value = sub_cc(r0_value, c0_value);
-                r1_value = subc_cc(r1_value, c1_value);
-                borrow_state = -subc(0, 0); // 0 or 1
-                sub_cc(r0_value, 1);
-                subc_cc(r1_value, 0);
-                borrow_state = (borrow_state << 1) -subc(0, 0);
-                // borrow_state:  0   no borrow    2  borrow    1  depends on previous
-                for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
-                    uint32_t prev_borrow = __shfl_up_sync(warp_mask, borrow_state, delta, BLOCK_SIZE);
-                    if (borrow_state == 1){
-                        borrow_state = prev_borrow;
-                    }
+        if (threadIdx.y == 0){
+            for (int si = 0; si < 2; si ++){
+                uint32_t r0_value, r1_value;
+                uint32_t r2_value, r3_value;
+                uint32_t c0_value, c1_value;
+                uint32_t c2_value, c3_value;
+                r0_value = r[2][threadIdx.x * 4 + 0];
+                r1_value = r[2][threadIdx.x * 4 + 1];
+                r2_value = r[2][threadIdx.x * 4 + 2];
+                r3_value = r[2][threadIdx.x * 4 + 3];
+                c0_value = r[si][threadIdx.x * 4 + 0];
+                c1_value = r[si][threadIdx.x * 4 + 1];
+                c2_value = r[si][threadIdx.x * 4 + 2];
+                c3_value = r[si][threadIdx.x * 4 + 3];
+                batch_mul_sub_128_single_warp<BLOCK_SIZE>(r0_value, r1_value, r2_value, r3_value, c0_value, c1_value, c2_value, c3_value);
+                if (threadIdx.x * 4 + 0 < L * 2){
+                    r[2][threadIdx.x * 4 + 0] = r0_value;
+                    r[2][threadIdx.x * 4 + 1] = r1_value;
                 }
-                if (threadIdx.y == 0 && threadIdx.x == BLOCK_SIZE - 1){
-                    carry_prop[0] = borrow_state & 2;
+                if (threadIdx.x * 4 + 2 < L * 2){
+                    r[2][threadIdx.x * 4 + 2] = r2_value;
+                    r[2][threadIdx.x * 4 + 3] = r3_value;
                 }
             }
-            __syncthreads();
-            if (threadIdx.y < 2){
-                if (borrow_state == 1){
-                    if (threadIdx.y == 1){
-                        borrow_state = carry_prop[0];
-                    }else{
-                        borrow_state = 0;
-                    }
-                }
-                borrow_state = __shfl_up_sync(warp_mask, borrow_state, 1, BLOCK_SIZE);
-                if (threadIdx.x == 0){
-                    if (threadIdx.y == 0){
-                        borrow_state = 0;
-                    }else{
-                        borrow_state = carry_prop[0];
-                    }
-                }
-                r0_value = sub_cc(r0_value, borrow_state >> 1);
-                r1_value = subc_cc(r1_value, 0);
-                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L * 2){
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
-                }
-            }
-            __syncthreads();
         }
+        __syncthreads();
+
+        __shared__ uint32_t carry_prop[3];
 
         // add r[2] back to r[1] and r[0]
         // r[1] : [0 .. L_split)  [L_split .. L_split * 2)
