@@ -471,73 +471,65 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         }
         __syncthreads();
 
-        // a[6] = a[0] + a[3], a[7] = a[1] + a[4], b[6] = b[0] + b[3], b[7] = b[1] + b[4]
-        if (threadIdx.y < 4){
+        // transform a and b
+        // a[2] = a[0] + a[1]
+        // a[5] = a[3] + a[5]
+        // a[6] = a[0] + a[3]
+        // a[7] = a[1] + a[4]
+        // a[8] = a[0] + a[1] + a[3] + a[4]
+        const int transform_table[5][5] = {
+            {2, 0, 1, -1, -1},
+            {8, 0, 1, 3, 4},
+            {5, 3, 4, -1, -1},
+            {6, 0, 3, -1, -1},
+            {7, 1, 4, -1, -1},
+        };
+        for (int role = threadIdx.y; role < 10; role += blockDim.y){
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
-            if (threadIdx.y < 2){
-                r0_value = a[threadIdx.y][threadIdx.x * 2 + 0];
-                r1_value = a[threadIdx.y][threadIdx.x * 2 + 1];
-                c0_value = a[threadIdx.y + 3][threadIdx.x * 2 + 0];
-                c1_value = a[threadIdx.y + 3][threadIdx.x * 2 + 1];
+            if (role < 5){
+                int src_id = transform_table[role][1];
+                r0_value = a[src_id][threadIdx.x * 2 + 0];
+                r1_value = a[src_id][threadIdx.x * 2 + 1];
             }else{
-                r0_value = b[threadIdx.y - 2][threadIdx.x * 2 + 0];
-                r1_value = b[threadIdx.y - 2][threadIdx.x * 2 + 1];
-                c0_value = b[threadIdx.y - 2 + 3][threadIdx.x * 2 + 0];
-                c1_value = b[threadIdx.y - 2 + 3][threadIdx.x * 2 + 1];
+                int src_id = transform_table[role - 5][1];
+                r0_value = b[src_id][threadIdx.x * 2 + 0];
+                r1_value = b[src_id][threadIdx.x * 2 + 1];
             }
-            
-            batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
-            if (threadIdx.y < 2){
-                if (threadIdx.x * 2 + 0 < L_quad){
-                    a[threadIdx.y + 6][threadIdx.x * 2 + 0] = r0_value;
-                }
-                if (threadIdx.x * 2 + 1 < L_quad){
-                    a[threadIdx.y + 6][threadIdx.x * 2 + 1] = r1_value;
-                }
-            }else{
-                if (threadIdx.x * 2 + 0 < L_quad){
-                    b[threadIdx.y - 2 + 6][threadIdx.x * 2 + 0] = r0_value;
-                }
-                if (threadIdx.x * 2 + 1 < L_quad){
-                    b[threadIdx.y - 2 + 6][threadIdx.x * 2 + 1] = r1_value;
+            for (int i = 2; i < 5; i ++){
+                if (role < 5){
+                    int src_id = transform_table[role][i];
+                    if (src_id == -1){
+                        break;
+                    }
+                    c0_value = a[src_id][threadIdx.x * 2 + 0];
+                    c1_value = a[src_id][threadIdx.x * 2 + 1];
+                    batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
+                }else{
+                    int src_id = transform_table[role - 5][i];
+                    if (src_id == -1){
+                        break;
+                    }
+                    c0_value = b[src_id][threadIdx.x * 2 + 0];
+                    c1_value = b[src_id][threadIdx.x * 2 + 1];
+                    batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
                 }
             }
-        }
-        __syncthreads();
-        
-        // a[2] = a[0] + a[1], a[5] = a[3] + a[4], a[8] = a[6] + a[7]
-        // b[2] = b[0] + b[1], b[5] = b[3] + b[4], b[8] = b[6] + b[7]
-        if (threadIdx.y < 6){
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
-            if (threadIdx.y < 3){
-                r0_value = a[threadIdx.y * 3][threadIdx.x * 2 + 0];
-                r1_value = a[threadIdx.y * 3][threadIdx.x * 2 + 1];
-                c0_value = a[threadIdx.y * 3 + 1][threadIdx.x * 2 + 0];
-                c1_value = a[threadIdx.y * 3 + 1][threadIdx.x * 2 + 1];
-            }else{
-                r0_value = b[(threadIdx.y - 3) * 3][threadIdx.x * 2 + 0];
-                r1_value = b[(threadIdx.y - 3) * 3][threadIdx.x * 2 + 1];
-                c0_value = b[(threadIdx.y - 3) * 3 + 1][threadIdx.x * 2 + 0];
-                c1_value = b[(threadIdx.y - 3) * 3 + 1][threadIdx.x * 2 + 1];
-            }
-
-            batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
-
-            if (threadIdx.y < 3){
+            if (role < 5){
+                int dst_id = transform_table[role][0];
                 if (threadIdx.x * 2 + 0 < L_quad){
-                    a[threadIdx.y * 3 + 2][threadIdx.x * 2 + 0] = r0_value;
+                    a[dst_id][threadIdx.x * 2 + 0] = r0_value;
                 }
                 if (threadIdx.x * 2 + 1 < L_quad){
-                    a[threadIdx.y * 3 + 2][threadIdx.x * 2 + 1] = r1_value;
+                    a[dst_id][threadIdx.x * 2 + 1] = r1_value;
                 }
             }else{
+                int dst_id = transform_table[role - 5][0];
                 if (threadIdx.x * 2 + 0 < L_quad){
-                    b[(threadIdx.y - 3) * 3 + 2][threadIdx.x * 2 + 0] = r0_value;
+                    b[dst_id][threadIdx.x * 2 + 0] = r0_value;
                 }
                 if (threadIdx.x * 2 + 1 < L_quad){
-                    b[(threadIdx.y - 3) * 3 + 2][threadIdx.x * 2 + 1] = r1_value;
+                    b[dst_id][threadIdx.x * 2 + 1] = r1_value;
                 }
             }
         }
