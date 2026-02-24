@@ -252,19 +252,19 @@ int main() {
 
 /*
 Benchmarking L=65, N=1538461 (N*L=99999965)...
-  Average time: 2.953 ms
-  Multiplications per second: 520.98 million
-  Effective bandwidth: 270.91 GB/s
+  Average time: 2.666 ms
+  Multiplications per second: 577.12 million
+  Effective bandwidth: 300.10 GB/s
 Benchmarking L=121, N=826446 (N*L=99999966)...
-  Average time: 2.511 ms
-  Multiplications per second: 329.07 million
-  Effective bandwidth: 318.54 GB/s
+  Average time: 2.322 ms
+  Multiplications per second: 355.89 million
+  Effective bandwidth: 344.50 GB/s
 Benchmarking L=241, N=414937 (N*L=99999817)...
-  Average time: 4.998 ms
-  Multiplications per second: 83.02 million
-  Effective bandwidth: 160.07 GB/s
+  Average time: 4.842 ms
+  Multiplications per second: 85.70 million
+  Effective bandwidth: 165.24 GB/s
 Benchmarking L=481, N=207900 (N*L=99999900)...
-  Average time: 9.764 ms
-  Multiplications per second: 21.29 million
-  Effective bandwidth: 81.93 GB/s
+  Average time: 9.716 ms
+  Multiplications per second: 21.40 million
+  Effective bandwidth: 82.34 GB/s
 */
