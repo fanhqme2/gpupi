@@ -116,3 +116,68 @@ __device__ __forceinline__ void batch_mul_sub_128_single_warp(
     r2_value = subc_cc(r2_value, 0);
     r3_value = subc_cc(r3_value, 0);
 }
+
+template<int BLOCK_SIZE>
+__device__ __forceinline__ void batch_mul_add_64_grouped_warp(
+    uint32_t & r0_value, uint32_t & r1_value, uint32_t & c0_value, uint32_t & c1_value,
+    int rank, int group_size, bool is_active,
+    uint32_t * carry_prop
+){
+    const unsigned int warp_mask = (1ull << BLOCK_SIZE) - 1;
+    uint32_t carry_state;
+    if (is_active){
+        r0_value = add_cc(r0_value, c0_value);
+        r1_value = addc_cc(r1_value, c1_value);
+
+        carry_state = addc(0, 0);
+        add_cc(1, r0_value);
+        addc_cc(0, r1_value);
+        carry_state = addc(carry_state, carry_state);
+
+        // carry_state:  0   no carry    2  carry    1  depends on previous
+        for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
+            uint32_t prev_carry = __shfl_up_sync(warp_mask, carry_state, delta, BLOCK_SIZE);
+            if (carry_state == 1){
+                carry_state = prev_carry;
+            }
+        }
+        if (threadIdx.x == BLOCK_SIZE - 1){
+            carry_prop[rank] = carry_state;
+        }
+    }
+    __syncthreads();
+
+    if (is_active){
+        if (rank == 0){
+            if (carry_prop[0] == 1){
+                carry_prop[0] = 0;
+            }
+            for (int i = 1; i < group_size - 1; i++){
+                if (carry_prop[i] == 1){
+                    carry_prop[i] = carry_prop[i - 1];
+                }
+            }
+        }
+    }
+
+    __syncthreads();
+    if (is_active){
+        if (carry_state == 1){
+            if (rank > 0){
+                carry_state = carry_prop[rank - 1];
+            }else{
+                carry_state = 0;
+            }
+        }
+        carry_state = __shfl_up_sync(warp_mask, carry_state, 1, BLOCK_SIZE);
+        if (threadIdx.x == 0){
+            if (rank == 0){
+                carry_state = 0;
+            }else{
+                carry_state = carry_prop[rank - 1];
+            }
+        }
+        r0_value = add_cc(r0_value, carry_state >> 1);
+        r1_value = addc_cc(r1_value, 0);
+    }
+}
