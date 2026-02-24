@@ -258,18 +258,14 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
             }
         }
         __syncthreads();
-        for (int i0 = 0; i0 < L * 2; i0 += BLOCK_SIZE * 2){
-            r[threadIdx.y][i0 + threadIdx.x * 2] = 0;
-            r[threadIdx.y][i0 + threadIdx.x * 2 + 1] = 0;
-        }
-        __syncthreads();
-        for (int i0 = 0; i0 < L; i0 += BLOCK_SIZE * 2){
+
+        if (true){
             uint32_t a0_value, a1_value;
             uint32_t r0_value, r1_value;
-            a0_value = a[threadIdx.y][i0 + threadIdx.x * 2];
-            a1_value = a[threadIdx.y][i0 + threadIdx.x * 2 + 1];
-            r0_value = r[threadIdx.y][i0 + threadIdx.x * 2];
-            r1_value = r[threadIdx.y][i0 + threadIdx.x * 2 + 1];
+            a0_value = a[threadIdx.y][threadIdx.x * 2];
+            a1_value = a[threadIdx.y][threadIdx.x * 2 + 1];
+            r0_value = 0;
+            r1_value = 0;
             uint32_t c0_value = 0, c1_value = 0;
             for (int j = 0; j < L; j += 2){
                 uint32_t b0_value = b[threadIdx.y][j];
@@ -289,22 +285,22 @@ __global__ void batch_mul_toom22_directlv1_kernel(uint32_t * A, uint32_t * B, ui
                 c1_value = mul11 >> 32;
 
                 if (threadIdx.x == 0){
-                    r[threadIdx.y][i0 + j] = r0_value;
-                    r[threadIdx.y][i0 + j + 1] = r1_value;
+                    r[threadIdx.y][j] = r0_value;
+                    r[threadIdx.y][j + 1] = r1_value;
                 }
                 r0_value = __shfl_down_sync(warp_mask, r0_value, 1, BLOCK_SIZE);
                 r1_value = __shfl_down_sync(warp_mask, r1_value, 1, BLOCK_SIZE);
                 if (threadIdx.x == BLOCK_SIZE - 1){
-                    r0_value = r[threadIdx.y][i0 + j + BLOCK_SIZE * 2];
-                    r1_value = r[threadIdx.y][i0 + j + BLOCK_SIZE * 2 + 1];
+                    r0_value = 0;
+                    r1_value = 0;
                 }
             }
             int L2 = (L + 1) & -2;
 
             batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
 
-            r[threadIdx.y][i0 + threadIdx.x * 2 + L2] = r0_value;
-            r[threadIdx.y][i0 + threadIdx.x * 2 + 1 + L2] = r1_value;
+            r[threadIdx.y][threadIdx.x * 2 + L2] = r0_value;
+            r[threadIdx.y][threadIdx.x * 2 + 1 + L2] = r1_value;
         }
         __syncthreads();
         
@@ -536,18 +532,13 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         __syncthreads();
 
         // r[i] = a[i] * b[i]
-        for (int i0 = 0; i0 < L_quad * 2; i0 += BLOCK_SIZE * 2){
-            r[threadIdx.y][i0 + threadIdx.x * 2] = 0;
-            r[threadIdx.y][i0 + threadIdx.x * 2 + 1] = 0;
-        }
-        __syncthreads();
-        for (int i0 = 0; i0 < L_quad; i0 += BLOCK_SIZE * 2){
+        if (true){
             uint32_t a0_value, a1_value;
             uint32_t r0_value, r1_value;
-            a0_value = a[threadIdx.y][i0 + threadIdx.x * 2];
-            a1_value = a[threadIdx.y][i0 + threadIdx.x * 2 + 1];
-            r0_value = r[threadIdx.y][i0 + threadIdx.x * 2];
-            r1_value = r[threadIdx.y][i0 + threadIdx.x * 2 + 1];
+            a0_value = a[threadIdx.y][threadIdx.x * 2];
+            a1_value = a[threadIdx.y][threadIdx.x * 2 + 1];
+            r0_value = 0;
+            r1_value = 0;
             uint32_t c0_value = 0, c1_value = 0;
             for (int j = 0; j < L_quad; j += 2){
                 uint32_t b0_value = b[threadIdx.y][j];
@@ -567,22 +558,22 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
                 c1_value = mul11 >> 32;
 
                 if (threadIdx.x == 0){
-                    r[threadIdx.y][i0 + j] = r0_value;
-                    r[threadIdx.y][i0 + j + 1] = r1_value;
+                    r[threadIdx.y][j] = r0_value;
+                    r[threadIdx.y][j + 1] = r1_value;
                 }
                 r0_value = __shfl_down_sync(warp_mask, r0_value, 1, BLOCK_SIZE);
                 r1_value = __shfl_down_sync(warp_mask, r1_value, 1, BLOCK_SIZE);
                 if (threadIdx.x == BLOCK_SIZE - 1){
-                    r0_value = r[threadIdx.y][i0 + j + BLOCK_SIZE * 2];
-                    r1_value = r[threadIdx.y][i0 + j + BLOCK_SIZE * 2 + 1];
+                    r0_value = 0;
+                    r1_value = 0;
                 }
             }
             int L2 = (L_quad + 1) & -2;
 
             batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
 
-            r[threadIdx.y][i0 + threadIdx.x * 2 + L2] = r0_value;
-            r[threadIdx.y][i0 + threadIdx.x * 2 + 1 + L2] = r1_value;
+            r[threadIdx.y][threadIdx.x * 2 + L2] = r0_value;
+            r[threadIdx.y][threadIdx.x * 2 + 1 + L2] = r1_value;
         }
         __syncthreads();
 

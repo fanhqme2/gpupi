@@ -206,23 +206,19 @@ __global__ void batch_mul_direct_kernel5(uint32_t * A, uint32_t * B, uint32_t * 
             a[i] = A[idx * L + i];
             b[i] = B[idx * L + i];
         }
-        for (int i0 = 0; i0 < L * 2; i0 += BLOCK_SIZE * 2){
-            r[i0 + threadIdx.x * 2] = 0;
-            r[i0 + threadIdx.x * 2 + 1] = 0;
-        }
         __syncthreads();
-        for (int i0 = 0; i0 < L; i0 += BLOCK_SIZE * 2){
+        
+        if (true){
             uint32_t a0_value, a1_value;
             uint32_t r0_value, r1_value;
-            a0_value = a[i0 + threadIdx.x * 2];
-            a1_value = a[i0 + threadIdx.x * 2 + 1];
-            r0_value = r[i0 + threadIdx.x * 2];
-            r1_value = r[i0 + threadIdx.x * 2 + 1];
+            a0_value = a[threadIdx.x * 2];
+            a1_value = a[threadIdx.x * 2 + 1];
+            r0_value = 0;
+            r1_value = 0;
             uint32_t c0_value = 0, c1_value = 0;
             for (int j = 0; j < L; j += 2){
                 uint32_t b0_value = b[j];
                 uint32_t b1_value = b[j + 1];
-
                 uint64_t mul00 = (uint64_t)a0_value * (uint64_t)b0_value + r0_value + c0_value;
                 r0_value = (uint32_t)mul00;
                 uint32_t mid10 = mul00 >> 32;
@@ -235,16 +231,15 @@ __global__ void batch_mul_direct_kernel5(uint32_t * A, uint32_t * B, uint32_t * 
                 uint64_t mul11 = (uint64_t)a1_value * (uint64_t)b1_value + mid20 + mid21;
                 c0_value = (uint32_t)mul11;
                 c1_value = mul11 >> 32;
-
                 if (threadIdx.x == 0){
-                    r[i0 + j] = r0_value;
-                    r[i0 + j + 1] = r1_value;
+                    r[j] = r0_value;
+                    r[j + 1] = r1_value;
                 }
                 r0_value = __shfl_down_sync(warp_mask, r0_value, 1, BLOCK_SIZE);
                 r1_value = __shfl_down_sync(warp_mask, r1_value, 1, BLOCK_SIZE);
                 if (threadIdx.x == BLOCK_SIZE - 1){
-                    r0_value = r[i0 + j + BLOCK_SIZE * 2];
-                    r1_value = r[i0 + j + BLOCK_SIZE * 2 + 1];
+                    r0_value = 0;
+                    r1_value = 0;
                 }
             }
             int L2 = (L + 1) & -2;
@@ -267,10 +262,11 @@ __global__ void batch_mul_direct_kernel5(uint32_t * A, uint32_t * B, uint32_t * 
             }
             r0_value = add_cc(r0_value, carry_state >> 1);
             r1_value = addc_cc(r1_value, 0);
-            r[i0 + threadIdx.x * 2 + L2] = r0_value;
-            r[i0 + threadIdx.x * 2 + 1 + L2] = r1_value;
+            r[threadIdx.x * 2 + L2] = r0_value;
+            r[threadIdx.x * 2 + 1 + L2] = r1_value;
         }
         __syncthreads();
+
         for (int i = threadIdx.x; i < L * 2; i += BLOCK_SIZE){
             ret[idx * (L * 2) + i] = r[i];
         }
