@@ -470,6 +470,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
             }
         }
         __syncthreads();
+
         // a[6] = a[0] + a[3], a[7] = a[1] + a[4], b[6] = b[0] + b[3], b[7] = b[1] + b[4]
         if (threadIdx.y < 4){
             uint32_t r0_value, r1_value;
@@ -504,6 +505,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
             }
         }
         __syncthreads();
+        
         // a[2] = a[0] + a[1], a[5] = a[3] + a[4], a[8] = a[6] + a[7]
         // b[2] = b[0] + b[1], b[5] = b[3] + b[4], b[8] = b[6] + b[7]
         if (threadIdx.y < 6){
@@ -540,12 +542,6 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
             }
         }
         __syncthreads();
-        
-        // for (int j = threadIdx.x + threadIdx.y * BLOCK_SIZE; j < L_quad; j += blockDim.y * BLOCK_SIZE){
-        //     ret[idx * L_total * 2 + j] = a[6][j];
-        // }
-        // __syncthreads();
-        // continue;
 
         // r[i] = a[i] * b[i]
         for (int i0 = 0; i0 < L_quad * 2; i0 += BLOCK_SIZE * 2){
@@ -597,7 +593,6 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
             r[threadIdx.y][i0 + threadIdx.x * 2 + 1 + L2] = r1_value;
         }
         __syncthreads();
-
 
         // r[2] -= r[0] + r[1], r[5] -= r[3] + r[4], r[8] -= r[6] + r[7]
         if (threadIdx.y < 3){
