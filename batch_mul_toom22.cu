@@ -417,116 +417,67 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
     __syncthreads();
     __shared__ uint32_t carry_prop[9];
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
-        // load into a[0], a[1], a[3], a[4] and b[0], b[1], b[3], b[4]
+        // load and fuse:
+        // a[2] = a[0] + a[1], a[5] = a[3] + a[4]
+        // b[2] = b[0] + b[1], b[5] = b[3] + b[4]
         if (threadIdx.y < 4){
-            uint32_t * src_a;
-            int src_l, out_idx;
-            if (threadIdx.y == 3){
-                src_a = A + L_split * 3;
-                src_l = L_total - L_split * 3;
-                out_idx = 4;
-            }else if (threadIdx.y == 2){
-                src_a = A + L_split * 2;
-                src_l = L_split;
-                out_idx = 3;
-            }else if (threadIdx.y == 1){
-                src_a = A + L_split;
-                src_l = L_split;
-                out_idx = 1;
-            }else if (threadIdx.y == 0){
-                src_a = A;
-                src_l = L_split;
-                out_idx = 0;
-            }
-            for (int j = threadIdx.x; j < L_quad; j += BLOCK_SIZE){
-                a[out_idx][j] = (j < src_l) ? src_a[idx * L_total + j] : 0;
-            }
-        }else if (threadIdx.y < 8){
-            uint32_t * src_b;
-            int src_l, out_idx;
-            if (threadIdx.y == 7){
-                src_b = B + L_split * 3;
-                src_l = L_total - L_split * 3;
-                out_idx = 4;
-            }else if (threadIdx.y == 6){
-                src_b = B + L_split * 2;
-                src_l = L_split;
-                out_idx = 3;
-            }else if (threadIdx.y == 5){
-                src_b = B + L_split;
-                src_l = L_split;
-                out_idx = 1;
-            }else if (threadIdx.y == 4){
-                src_b = B;
-                src_l = L_split;
-                out_idx = 0;
-            }
-            for (int j = threadIdx.x; j < L_quad; j += BLOCK_SIZE){
-                b[out_idx][j] = (j < src_l) ? src_b[idx * L_total + j] : 0;
+            bool is_b = (threadIdx.y >= 2);
+            bool high_pair = (threadIdx.y & 1);
+            uint32_t * src = is_b ? B : A;
+            uint32_t (*dst)[BLOCK_SIZE * 2] = is_b ? b : a;
+
+            int lower_part = high_pair ? 2 : 0;
+            int upper_part = high_pair ? 3 : 1;
+            int lower_idx = high_pair ? 3 : 0;
+            int upper_idx = high_pair ? 4 : 1;
+            int sum_idx = high_pair ? 5 : 2;
+            int upper_len = high_pair ? (L_total - L_split * 3) : L_split;
+
+            for (int j_base = 0; j_base < L_quad; j_base += BLOCK_SIZE * 2){
+                int j = j_base + threadIdx.x * 2;
+                uint32_t r0_value = (j < L_split) ? src[idx * L_total + lower_part * L_split + j] : 0;
+                uint32_t r1_value = (j + 1 < L_split) ? src[idx * L_total + lower_part * L_split + j + 1] : 0;
+                uint32_t c0_value = (j < upper_len) ? src[idx * L_total + upper_part * L_split + j] : 0;
+                uint32_t c1_value = (j + 1 < upper_len) ? src[idx * L_total + upper_part * L_split + j + 1] : 0;
+                batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
+
+                if (j < L_quad){
+                    dst[lower_idx][j] = (j < L_split) ? src[idx * L_total + lower_part * L_split + j] : 0;
+                    dst[upper_idx][j] = (j < upper_len) ? src[idx * L_total + upper_part * L_split + j] : 0;
+                    dst[sum_idx][j] = r0_value;
+                }
+                if (j + 1 < L_quad){
+                    dst[lower_idx][j + 1] = (j + 1 < L_split) ? src[idx * L_total + lower_part * L_split + j + 1] : 0;
+                    dst[upper_idx][j + 1] = (j + 1 < upper_len) ? src[idx * L_total + upper_part * L_split + j + 1] : 0;
+                    dst[sum_idx][j + 1] = r1_value;
+                }
             }
         }
         __syncthreads();
 
         // transform a and b
-        // a[2] = a[0] + a[1]
-        // a[5] = a[3] + a[5]
-        // a[6] = a[0] + a[3]
-        // a[7] = a[1] + a[4]
-        // a[8] = a[0] + a[1] + a[3] + a[4]
-        const int transform_table[5][5] = {
-            {2, 0, 1, -1, -1},
-            {8, 0, 1, 3, 4},
-            {5, 3, 4, -1, -1},
-            {6, 0, 3, -1, -1},
-            {7, 1, 4, -1, -1},
-        };
-        for (int role = threadIdx.y; role < 10; role += blockDim.y){ // 0.713ms
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
-            if (role < 5){
-                int src_id = transform_table[role][1];
-                r0_value = a[src_id][threadIdx.x * 2 + 0];
-                r1_value = a[src_id][threadIdx.x * 2 + 1];
-            }else{
-                int src_id = transform_table[role - 5][1];
-                r0_value = b[src_id][threadIdx.x * 2 + 0];
-                r1_value = b[src_id][threadIdx.x * 2 + 1];
+        // a[2], a[5], b[2], b[5] are fused into load stage
+        // a[6] = a[0] + a[3], a[7] = a[1] + a[4], a[8] = a[2] + a[5]
+        // b[6] = b[0] + b[3], b[7] = b[1] + b[4], b[8] = b[2] + b[5]
+        // blockDim.y is fixed to 9 for this kernel launch
+        if (threadIdx.y < 6){
+            bool is_b = (threadIdx.y >= 3);
+            int local = is_b ? (threadIdx.y - 3) : threadIdx.y; // 0,1,2
+            int src0_id = local;
+            int src1_id = local + 3;
+            int dst_id = local + 6;
+            uint32_t (*src_dst)[BLOCK_SIZE * 2] = is_b ? b : a;
+
+            uint32_t r0_value = src_dst[src0_id][threadIdx.x * 2 + 0];
+            uint32_t r1_value = src_dst[src0_id][threadIdx.x * 2 + 1];
+            uint32_t c0_value = src_dst[src1_id][threadIdx.x * 2 + 0];
+            uint32_t c1_value = src_dst[src1_id][threadIdx.x * 2 + 1];
+            batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
+            if (threadIdx.x * 2 + 0 < L_quad){
+                src_dst[dst_id][threadIdx.x * 2 + 0] = r0_value;
             }
-            for (int i = 2; i < 5; i ++){
-                if (role < 5){
-                    int src_id = transform_table[role][i];
-                    if (src_id == -1){
-                        break;
-                    }
-                    c0_value = a[src_id][threadIdx.x * 2 + 0];
-                    c1_value = a[src_id][threadIdx.x * 2 + 1];
-                    batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
-                }else{
-                    int src_id = transform_table[role - 5][i];
-                    if (src_id == -1){
-                        break;
-                    }
-                    c0_value = b[src_id][threadIdx.x * 2 + 0];
-                    c1_value = b[src_id][threadIdx.x * 2 + 1];
-                    batch_mul_add_64_single_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value);
-                }
-            }
-            if (role < 5){
-                int dst_id = transform_table[role][0];
-                if (threadIdx.x * 2 + 0 < L_quad){
-                    a[dst_id][threadIdx.x * 2 + 0] = r0_value;
-                }
-                if (threadIdx.x * 2 + 1 < L_quad){
-                    a[dst_id][threadIdx.x * 2 + 1] = r1_value;
-                }
-            }else{
-                int dst_id = transform_table[role - 5][0];
-                if (threadIdx.x * 2 + 0 < L_quad){
-                    b[dst_id][threadIdx.x * 2 + 0] = r0_value;
-                }
-                if (threadIdx.x * 2 + 1 < L_quad){
-                    b[dst_id][threadIdx.x * 2 + 1] = r1_value;
-                }
+            if (threadIdx.x * 2 + 1 < L_quad){
+                src_dst[dst_id][threadIdx.x * 2 + 1] = r1_value;
             }
         }
         __syncthreads();
