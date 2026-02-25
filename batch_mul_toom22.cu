@@ -480,7 +480,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
             {6, 0, 3, -1, -1},
             {7, 1, 4, -1, -1},
         };
-        for (int role = threadIdx.y; role < 10; role += blockDim.y){
+        for (int role = threadIdx.y; role < 10; role += blockDim.y){ // 0.713ms
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
             if (role < 5){
@@ -532,7 +532,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         __syncthreads();
 
         // r[i] = a[i] * b[i]
-        if (true){
+        if (true){ // 2.569ms
             uint32_t a0_value, a1_value;
             uint32_t r0_value, r1_value;
             a0_value = a[threadIdx.y][threadIdx.x * 2];
@@ -578,7 +578,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         __syncthreads();
 
         // r[2] -= r[0] + r[1], r[5] -= r[3] + r[4], r[8] -= r[6] + r[7]
-        if (threadIdx.y < 3){
+        if (threadIdx.y < 3){ // 0.116ms
             uint32_t r0_value, r1_value;
             uint32_t r2_value, r3_value;
             uint32_t c0_value, c1_value;
@@ -609,7 +609,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         __syncthreads();
 
         // r[6] -= r[0] + r[3], r[7] -= r[1] + r[4], r[8] -= r[2] + r[5]
-        if (threadIdx.y < 3){
+        if (threadIdx.y < 3){ // 0.104ms
             uint32_t r0_value, r1_value;
             uint32_t r2_value, r3_value;
             uint32_t c0_value, c1_value;
@@ -641,7 +641,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
 
         // collapse r[2] to r[1]|r[0], r[5] to r[4]|r[3], r[8] to r[7]|r[6]
         // we will use a trick: just access r[0][x] with out-of-bound x, and it automatically wraps to r[1]
-        if (true){
+        if (true){ // 0.191ms
             int group_idx = threadIdx.y / 3;
             int rank_in_group = threadIdx.y % 3;
             int j_idx = rank_in_group * BLOCK_SIZE * 2 + threadIdx.x * 2;
@@ -673,7 +673,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         __syncthreads();
 
         // collapse r[6] to r[3]|r[0]
-        if (true){
+        if (true){ // 0.065ms
             int j_idx = threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2;
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
