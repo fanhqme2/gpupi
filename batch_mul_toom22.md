@@ -1,139 +1,199 @@
-Implementation of Toom-Cook 2-way multiplication algorithm.
+Implementation blueprint for `batch_mul_toom22.cu` (current version).
 
-# Input and Output
+# High-Level Algorithm Overview
 
-Takes two arrays of large integers A, B as input. Each array contains N numbers stored continuously as L uint32_t words.
-The output array is of size N * (2 * L) words.
-Also, a workspace pointer is needed.
-A dedicated function `batch_mul_toom22_workspace_size()` is needed to compute the workspace size.
+This implementation is based on Toom-Cook 2-way multiplication (Karatsuba).
 
-# File Structures
+For each large integer product `A * B`, it recursively splits numbers into two halves:
 
-batch_mul_toom22.h                  header, defines the entry function
-batch_mul_toom22.cu                 implementation code
-batch_mul_toom22_test.cu            test case program
-batch_mul_toom22_test_compile.sh    compilation command
+- `A = A0 * x + A1`
+- `B = B0 * x + B1`
 
-# The Algorithm
+where `x = 2^(32 * L_split)` in word-space.
 
-We can always assume that L <= BATCH_MUL_TOOM22_L_MAX
-Given N and L, we first check if L <= BATCH_MUL_DIRECT_L_MAX. If so, call the direct method `batch_mul_direct` defined in batch_mul_direct.h and implemented in batch_mul_direct.cu.
-We don't need any workspace in this case.
-Otherwise, a recursive algorithm is used.
+Instead of 4 half-size multiplications, it computes 3:
 
-We first determine:
-- `L_split = ceil(L/2)` - the actual split point for decomposing numbers
-- `L_half = L_split + 1 = ceil(L/2) + 1` - buffer size for padded storage
+- `C0 = A0 * B0`
+- `C1 = A1 * B1`
+- `C2 = (A0 + A1) * (B0 + B1)`
 
-The reduction produces 3N instances of L_half sized multiplication.
-To do the reduction, for each number a in A, we decompose a into two halves, a0 (higher) and a1 (lower). Similarly, we decompose b into b0 and b1. Then we have:
-- c0 = a0 * b0
-- c1 = a1 * b1  
-- c2 = (a0 + a1) * (b0 + b1)
+Then it reconstructs:
 
-L_half is chosen so that both (a0+a1) and (b0+b1) fit into L_half words (L_split + 1 = ceil(L/2) + 1).
+`A * B = C0 * x^2 + (C2 - C0 - C1) * x + C1`
 
-Additionally, when L_half would be <= BATCH_MUL_DIRECT_L_MAX (i.e., when the next recursive level will use the direct method), L_half is rounded up to the next multiple of 4. This ensures better memory alignment and improves performance of the direct multiplication kernel. The actual split point L_split remains unchanged - only the buffer size L_half is adjusted.
+This reduces multiplication count asymptotically (vs. schoolbook) and is the core reason for the speedup. In this codebase, recursion is combined with two optimized non-recursive base kernels (`directlv1`, `directlv2`) to avoid overhead at smaller sizes.
 
-The arrays of the reduced operands and results should be allocated in the workspace (incrementing the workspace pointer before passing to subsequent recursive calls).
+# Interface
 
-# Low-level Arithmetic Primitives
+The entry point is:
 
-The implementation uses inline PTX assembly for efficient carry/borrow propagation:
+`void batch_mul_toom22(uint32_t *A, uint32_t *B, uint32_t *ret, uint32_t *workspace, int N, int L)`
 
-- `add_cc(a, b)` - Add with carry-out, sets carry flag
-- `addc_cc(a, b)` - Add with carry-in and carry-out, uses and sets carry flag
-- `addc(a, b)` - Add with carry-in, uses carry flag but no output carry
-- `sub_cc(a, b)` - Subtract with borrow-out, sets carry flag
-- `subc_cc(a, b)` - Subtract with borrow-in and borrow-out, uses and sets carry flag
-- `subc(a, b)` - Subtract with borrow-in, uses carry flag but no output borrow
+- `A`, `B`: `N` big integers, each with `L` words (`uint32_t`).
+- `ret`: output buffer with `N * (2 * L)` words.
+- `workspace`: scratch buffer (may be unused for small `L`).
+- `batch_mul_toom22_workspace_size(N, L)` returns required bytes.
 
-These primitives enable efficient multi-precision addition and subtraction with proper carry/borrow chain handling.
+# File Layout
 
-# Transform Kernel
+- `batch_mul_toom22.h`: public API
+- `batch_mul_toom22.cu`: implementation
+- `batch_mul_toom22_test.cu`: correctness + benchmark
+- `batch_mul_toom22_test_compile.sh`: build script
 
-The transform is done by `batch_mul_toom22_transform_kernel` that:
-1. Copies and pads a0, a1 (or b0, b1) to L_half length
-2. Computes a0 + a1, b0 + b1 using the add-with-carry primitives
+# High-Level Dispatch
 
-The kernel uses a 2D grid where blockIdx.y selects between A (y=0) and B (y=1) arrays.
-Shared memory is used to store decomposed parts and their sums:
-- `a0[L_BLOCK][BLOCK_SIZE+1]` - higher half
-- `a1[L_BLOCK][BLOCK_SIZE+1]` - lower half  
-- `a_sum[L_BLOCK][BLOCK_SIZE+1]` - sum of halves
+Given `(N, L)`:
 
-Each block processes BLOCK_SIZE problem instances in batch, working in chunks of L_BLOCK elements at a time for efficient memory access.
+1. If `L <= BATCH_MUL_DIRECT_L_MAX`, call `batch_mul_direct`.
+2. Else compute:
+   - `L_split = ceil(L / 2)`
+   - `L_half = L_split + 1`
+3. If `L_half <= BATCH_MUL_DIRECT_L_MAX`, run `batch_mul_toom22_directlv1_kernel<32>` with block `(32, 3, 1)`.
+4. Else if `L <= BATCH_MUL_TOOM22_LV2_MAX` (`252`), run `batch_mul_toom22_directlv2_kernel<32>` with block `(32, 9, 1)`.
+5. Else run recursive path:
+   - transform (`A,B -> A_combined,B_combined`)
+   - recursive multiply on `3N` instances of size `L_half`
+   - reconstruct to size `2L`
 
-The transform produces interleaved output arrays of size 3N * L_half:
-- A_combined = [a0_0, ..., a0_{N-1}, a1_0, ..., a1_{N-1}, a_sum_0, ..., a_sum_{N-1}]
-- B_combined = [b0_0, ..., b0_{N-1}, b1_0, ..., b1_{N-1}, b_sum_0, ..., b_sum_{N-1}]
+`L_half` is rounded up to a multiple of 4 only when `L_half <= BATCH_MUL_DIRECT_L_MAX` (to help direct kernel alignment).
 
-# Recursive Multiplication
+# Chunking Policy
 
-After transformation, we recursively call `batch_mul_toom22_internal()` once with 3N instances to get the C array:
-- C_combined = [c0_0, ..., c0_{N-1}, c1_0, ..., c1_{N-1}, c2_0, ..., c2_{N-1}]
-where each cX_i has 2*L_half words.
+`batch_mul_toom22()` processes input in chunks:
 
-# Reconstruct Kernel
+- If `L > BATCH_MUL_TOOM22_LV2_MAX`: `N_max = min(N, 170 * 128)`
+- Else: `N_max = N` (no chunking needed; direct kernels need no workspace)
 
-The recovery is done by `batch_mul_toom22_reconstruct_kernel` which computes:
-```
-a * b = ((c0 << 2*L_split) + c1) + ((c2 - c0 - c1) << L_split)
-```
-Note: the shift amount is L_split = ceil(L/2), not L_half.
+# Arithmetic Primitives
 
-The kernel:
-1. Computes `((c0 << 2*L_split) + c1)` by copying c0 and c1 into the result array (only copying 2*L - 2*L_split words from c0, which is safe as c0 has at least two leading zero words)
-2. Subtracts c0 and c1 from c2 using subtract-with-borrow primitives for efficient propagation
-3. Adds the subtracted result to the output at offset L_split
+Carry/borrow helpers from `batch_mul_addsub_warp.h` are used heavily:
 
-Shared memory arrays are used:
-- `part1` - stores combined c0/c1 result
-- `part2` - stores c2 and intermediate subtraction results
-- `part3` - stores c0 for subtraction
-- `part4` - stores c1 for subtraction
+- `batch_mul_add_64_single_warp`
+- `batch_mul_add_64_all_warp`
+- `batch_mul_add_64_grouped_warp`
+- `batch_mul_sub_128_single_warp`
 
-# Block Size and Parallelization
+They use warp shuffles, so every lane in a participating warp must execute the same helper call at the same time.
 
-## Kernel Launch Configuration
+# Recursive Path Details
 
-Transform kernel:
-- Grid: dim3(num_blocks, 2, 1) where num_blocks = min(ceil(N/32), 170*8)
-- Block: 32 threads
-- Template parameters: L_BLOCK=32, BLOCK_SIZE=32
+## Transform Kernel (`batch_mul_toom22_transform_kernel`)
 
-Reconstruct kernel:
-- Grid: num_blocks_2 = min(ceil(N/16), 170*16)
-- Block: 16 threads
-- Template parameters: L_BLOCK=16, BLOCK_SIZE=16
+Inputs are split into:
 
-## Chunking for Large N
+- low half (`a1`, `b1`) of length `L_split`
+- high half (`a0`, `b0`) of length `L - L_split`
 
-To limit workspace usage, for large N we break them into sequential processing of N_max instances at once.
-N_max is determined as follows:
-- if L > 250, N_max = 170 * 128
-- otherwise, if L > 126, N_max = 170 * 128 * 2
-- otherwise, N_max = 170 * 128 * 4
+Outputs are packed as 3 groups (length `L_half` each):
 
-The main entry function `batch_mul_toom22()` iterates through chunks of size N_max, calling the internal recursive function for each chunk.
+- group 0: high half
+- group 1: low half
+- group 2: sum (high + low) with full carry propagation
 
-# Workspace Size Calculation
+Layout:
 
-`batch_mul_toom22_workspace_size()` computes the total workspace needed recursively:
-1. If L <= BATCH_MUL_DIRECT_L_MAX, returns 0
-2. Otherwise, computes current level needs:
-   - A_combined: 3*N*L_half words
-   - B_combined: 3*N*L_half words
-   - C_combined: 3*N*(L_half*2) words
-3. Adds recursive workspace for 3*N instances of size L_half
+- `A_out = [A0, A1, A2]` where each group has `N * L_half` words
+- `B_out = [B0, B1, B2]` similarly
 
-The size is calculated for a single chunk (chunk_N = min(N, N_max)) and returned in bytes.
+## Reconstruct Kernel (`batch_mul_toom22_reconstruct_kernel`)
 
-# Testing
+Given:
 
-The testing method should be similar to batch_mul_direct_test.cu but with the following modifications:
-- L should be between BATCH_MUL_DIRECT_L_MAX+1 and BATCH_MUL_TOOM22_L_MAX
-- For small size, N*L <= 16384
-- Benchmarking should go for L = 481, 241, 121, 65 with N*L <= 1e8
+- `c0 = a0*b0`
+- `c1 = a1*b1`
+- `c2 = (a0+a1)*(b0+b1)`
 
-The compilation script should compile the test program (using necessary .cu files as input, link against GMP library), and look similar to batch_mul_direct_test_compile.sh.
+it computes:
+
+`a*b = c1 + ((c2 - c0 - c1) << L_split) + (c0 << (2*L_split))`
+
+The kernel performs:
+
+1. Two subtract rounds on `c2` (subtract `c0`, then `c1`) with borrow propagation.
+2. Carry-aware stitched additions into the final output windows.
+3. Final writeback to `ret`.
+
+# Direct Level 1 Kernel (`batch_mul_toom22_directlv1_kernel`)
+
+Used when one Toom-2 reduction is enough (next level fits direct multiply).
+
+For each instance:
+
+1. Split at `L_split = ceil(L/2)` into two parts.
+2. Build 3 evaluation points per operand:
+   - one point for each split part
+   - one point for their sum
+3. Compute 3 pointwise products.
+4. Interpolate with subtract/add stages and place into final `2L` result.
+
+# Direct Level 2 Kernel (`batch_mul_toom22_directlv2_kernel`)
+
+Used for `L <= 252` when directlv1 is not yet applicable.
+
+## Data Decomposition
+
+It uses quarter split:
+
+- `L_split = ceil(L / 4)`
+- `L_quad = L_split + 1`
+
+Each operand is represented with 9 evaluation polynomials (`a[0..8]`, `b[0..8]`):
+
+- base parts:
+  - `0`: part0
+  - `1`: part1
+  - `3`: part2
+  - `4`: part3
+- fused during load:
+  - `2 = 0 + 1`
+  - `5 = 3 + 4`
+- second transform round:
+  - `6 = 0 + 3`
+  - `7 = 1 + 4`
+  - `8 = 2 + 5`
+
+The current code assumes `blockDim.y == 9` for this kernel.
+
+## Important Optimization Notes
+
+1. The first transform pair (`2`, `5`) is fused into the load stage.
+2. `8` is computed as `2 + 5` (not `0 + 1 + 3 + 4`).
+3. No transform lookup table is used now; source/destination indices are derived directly from `threadIdx.y`.
+
+## Interpolation Structure
+
+After 9 pointwise products (`r[0..8]`):
+
+1. `r[2], r[5], r[8] -= (r[0],r[3],r[6]) + (r[1],r[4],r[7])`
+2. `r[6], r[7], r[8] -= (r[0],r[1],r[2]) + (r[3],r[4],r[5])`
+3. Collapse each 3-lane group with grouped carry-aware additions.
+4. Add the collapsed `r[6]` branch back into the final accumulator window.
+5. Store `r[0]` as final result for this instance.
+
+# Workspace Sizing
+
+`workspace_size_words_internal(N, L)`:
+
+1. Returns 0 when `L <= BATCH_MUL_DIRECT_L_MAX`.
+2. Computes `L_split`, `L_half` (with same alignment rule), `c_size = 2 * L_half`.
+3. If `L > BATCH_MUL_TOOM22_LV2_MAX`, adds:
+   - `3 * N * L_half * 2` words (`A_combined + B_combined`)
+   - `3 * N * c_size` words (`C_combined`)
+4. Adds recursive workspace for `(3N, L_half)`.
+
+Public API `batch_mul_toom22_workspace_size(N, L)` applies this to one chunk (`chunk_N = get_N_max(N, L)`) and returns bytes.
+
+# Current Test/Baseline Setup
+
+`batch_mul_toom22_test.cu` does:
+
+- randomized correctness across small/medium/large `(N, L)` ranges
+- benchmark at `L = 65, 121, 241, 481` with `N*L ~= 1e8`
+
+Latest recorded benchmark comment in test file:
+
+- `L=65`: `2.716 ms`
+- `L=121`: `2.364 ms`
+- `L=241`: `4.192 ms`
+- `L=481`: `8.714 ms`
