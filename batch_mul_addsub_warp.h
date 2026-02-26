@@ -1,5 +1,6 @@
 #pragma once
 #include "batch_mul_addsub_asm.h"
+#include <cuda/warp>
 
 template<int BLOCK_SIZE>
 __device__ __forceinline__ void batch_mul_add_64_single_warp(
@@ -243,6 +244,125 @@ __device__ __forceinline__ void batch_mul_sub_64_grouped_warp(
             }
         }
         r0_value = sub_cc(r0_value, borrow_state >> 1);
+        r1_value = subc_cc(r1_value, 0);
+    }
+}
+
+template<int BLOCK_SIZE>
+__device__ __forceinline__ void batch_mul_add3_64_grouped_warp(
+    uint32_t & r0_value, uint32_t & r1_value, uint32_t & c0_value, uint32_t & c1_value,
+    uint32_t & t0_value, uint32_t & t1_value,
+    int rank, int group_size, bool is_active,
+    ushort2 * carry_prop
+){
+    ushort2 carry;
+    if (is_active){
+        r0_value = add_cc(r0_value, c0_value);
+        r1_value = addc_cc(r1_value, c1_value);
+        carry.x = addc(0, 0);
+        r0_value = add_cc(r0_value, t0_value);
+        r1_value = addc_cc(r1_value, t1_value);
+        carry.x += addc(0, 0);
+        add_cc(r0_value, 2);
+        addc_cc(r1_value, 0);
+        if (addc(0, 0)){
+            carry.y = r0_value & 3;
+        }else{
+            carry.y = 0;
+        }
+        for (int delta = 1; delta < 32; delta *= 2){
+            ushort2 carry_prev = cuda::device::warp_shuffle_up<BLOCK_SIZE, ushort2>(carry, delta);
+            if (threadIdx.x >= delta){
+                ushort compound = carry.y + carry_prev.x;
+                carry.x += compound >> 2;
+                if ((compound & 3) == 3){
+                    carry.y = carry_prev.y;
+                }else{
+                    carry.y = 0;
+                }
+            }
+        }
+        
+        if (threadIdx.x == BLOCK_SIZE - 1){
+            carry_prop[rank] = carry;
+        }
+    }
+    __syncthreads();
+    if (is_active && rank == 0 && threadIdx.x == 0){
+        carry_prop[0].y = 0;
+        for (int i = 1; i < group_size - 1; i ++){
+            carry_prop[i].x += (carry_prop[i].y + carry_prop[i - 1].x) >> 2;
+        }
+    }
+    __syncthreads();
+    if (is_active){
+        carry = cuda::device::warp_shuffle_up<BLOCK_SIZE, ushort2>(carry, 1);
+        if (threadIdx.x == 0){
+            if (rank == 0){
+                carry.x = 0;
+            }else{
+                carry.x = carry_prop[rank - 1].x;
+            }
+        }
+        r0_value = add_cc(r0_value, (uint32_t)carry.x);
+        r1_value = addc_cc(r1_value, 0);
+    }
+}
+
+template<int BLOCK_SIZE>
+__device__ __forceinline__ void batch_mul_sub3_64_grouped_warp(
+    uint32_t & r0_value, uint32_t & r1_value,
+    uint32_t & c0_value, uint32_t & c1_value,
+    uint32_t & t0_value, uint32_t & t1_value,
+    int rank, int group_size, bool is_active,
+    ushort2 * carry_prop
+){
+    ushort2 borrow;
+    if (is_active){
+        r0_value = sub_cc(r0_value, c0_value);
+        r1_value = subc_cc(r1_value, c1_value);
+        borrow.x = -subc(0, 0);
+        r0_value = sub_cc(r0_value, t0_value);
+        r1_value = subc_cc(r1_value, t1_value);
+        borrow.x -= subc(0, 0);
+        sub_cc(r0_value, 2);
+        subc_cc(r1_value, 0);
+        if (subc(0, 0)){
+            borrow.y = 3 - (r0_value & 3);
+        }else{
+            borrow.y = 0;
+        }
+        for (int delta = 1; delta < 32; delta *= 2){
+            ushort2 borrow_prev = cuda::device::warp_shuffle_up<BLOCK_SIZE, ushort2>(borrow, delta);
+            if (threadIdx.x >= delta){
+                ushort compound = borrow.y + borrow_prev.x;
+                borrow.x += compound >> 2;
+                if ((compound & 3) == 3){
+                    borrow.y = borrow_prev.y;
+                }else{
+                    borrow.y = 0;
+                }
+            }
+        }
+    }
+    __syncthreads();
+    if (is_active && rank == 0 && threadIdx.x == 0){
+        carry_prop[0].y = 0;
+        for (int i = 1; i < group_size - 1; i ++){
+            carry_prop[i].x += (carry_prop[i].y + carry_prop[i - 1].x) >> 2;
+        }
+    }
+    __syncthreads();
+    if (is_active){
+        borrow = cuda::device::warp_shuffle_up<BLOCK_SIZE, ushort2>(borrow, 1);
+        if (threadIdx.x == 0){
+            if (rank == 0){
+                borrow.x = 0;
+            }else{
+                borrow = carry_prop[rank - 1];
+            }
+        }
+        r0_value = sub_cc(r0_value, (uint32_t)borrow.x);
         r1_value = subc_cc(r1_value, 0);
     }
 }

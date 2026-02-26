@@ -69,6 +69,32 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
         }
         __syncthreads();
 
+        /*if (true){
+            uint32_t r0_value, r1_value;
+            uint32_t c0_value, c1_value;
+            uint32_t t0_value, t1_value;
+            if (threadIdx.y < warp_per_group * 2){
+                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+                c0_value = r[0][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                c1_value = r[0][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+                t0_value = r[1][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
+                t1_value = r[1][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
+            }
+            batch_mul_sub3_64_grouped_warp<BLOCK_SIZE>(
+                r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
+                threadIdx.y, warp_per_group * 2, threadIdx.y < warp_per_group * 2,
+                reinterpret_cast<ushort2*>(carry_prop)
+            );
+            if (threadIdx.y < warp_per_group * 2){
+                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L_half * 2){
+                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
+                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
+                }
+            }
+            __syncthreads();
+        }*/
+
         for (int si = 0; si < 2; si ++){
             uint32_t borrow_state;
             uint32_t r0_value, r1_value;
@@ -415,7 +441,6 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
         b[threadIdx.y][i0 + threadIdx.x * 2 + 1] = 0;
     }
     __syncthreads();
-    __shared__ uint32_t carry_prop[9];
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
         // load and fuse:
         // a[2] = a[0] + a[1], a[5] = a[3] + a[4]
@@ -606,13 +631,9 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
             t0_value = (j_idx >= L_split) ? r[group_idx * 3 + 1][j_idx - L_split] : 0;
             t1_value = (j_idx + 1 >= L_split) ? r[group_idx * 3 + 1][j_idx + 1 - L_split] : 0;
 
-            batch_mul_add_64_grouped_warp<BLOCK_SIZE>(
-                r0_value, r1_value, c0_value, c1_value,
-                rank_in_group, 3, true,
-                carry_prop + group_idx * 3
-            );
-            batch_mul_add_64_grouped_warp<BLOCK_SIZE>(
-                r0_value, r1_value, t0_value, t1_value,
+            __shared__ ushort2 carry_prop[9];
+            batch_mul_add3_64_grouped_warp<BLOCK_SIZE>(
+                r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
                 rank_in_group, 3, true,
                 carry_prop + group_idx * 3
             );
@@ -646,6 +667,7 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
                     r1_value = 0;
                 }
             }
+            __shared__ uint32_t carry_prop[9];
             batch_mul_add_64_grouped_warp<BLOCK_SIZE>(
                 r0_value, r1_value, c0_value, c1_value,
                 threadIdx.y, 6, threadIdx.y < 6,
