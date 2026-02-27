@@ -56,8 +56,8 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
     int N, int L_total, int L_split, int L_half
 ) {
     __shared__ uint32_t r[2][512];
-    __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 2 / BLOCK_SIZE + 1];
-    int warp_per_group = (L_half + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
+    __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / BLOCK_SIZE + 1];
+    int participating_warps = (L_half * 2 + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
 
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
         int j_idx = threadIdx.y * BLOCK_SIZE + threadIdx.x;
@@ -81,9 +81,10 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
                 ret[idx * L_total * 2 + j_idx * 2 + 1] = c1_value;
             }
         }
+        
         batch_mul_sub3_64_grouped_warp<BLOCK_SIZE>(
             r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
-            threadIdx.y, warp_per_group * 2, threadIdx.y < warp_per_group * 2,
+            threadIdx.y, participating_warps, threadIdx.y < participating_warps,
             reinterpret_cast<ushort2*>(carry_prop)
         );
 
@@ -641,8 +642,8 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
 
         int num_blocks_2 = N;
         if (num_blocks_2 > 65536) num_blocks_2 = 65536;
-        int num_warps_2 = (L_half + 64 - 1) / 64;
-        batch_mul_toom22_reconstruct_kernel<32><<<num_blocks_2, dim3(32, num_warps_2 * 3, 1)>>>(
+        int num_warps_2 = (L_split + L_half * 2 + 64 - 1) / 64;
+        batch_mul_toom22_reconstruct_kernel<32><<<num_blocks_2, dim3(32, num_warps_2, 1)>>>(
             ret, C_combined, N, L, L_split, L_half
         );
 
