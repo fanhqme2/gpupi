@@ -46,6 +46,7 @@ __global__ void batch_mul_toom22_transform_kernel(
         if (j_idx + 1 < L_half){
             dst[(N * 2 + idx) * L_half + j_idx + 1] = r1_value;
         }
+        __syncthreads();
     }
 }
 
