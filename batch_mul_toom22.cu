@@ -55,98 +55,63 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
     const uint32_t * C,
     int N, int L_total, int L_split, int L_half
 ) {
-    __shared__ uint32_t r[3][512];
+    __shared__ uint32_t r[2][512];
     __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 2 / BLOCK_SIZE + 1];
     int warp_per_group = (L_half + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
-    int j_idx = (threadIdx.y % warp_per_group) * BLOCK_SIZE + threadIdx.x;
 
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
-        for (int j = threadIdx.x + threadIdx.y * BLOCK_SIZE; j < L_half * 2; j += blockDim.y * BLOCK_SIZE){
-            r[0][j] = C[idx * L_half * 2 + j];
-            r[1][j] = C[(N + idx) * L_half * 2 + j];
-            r[2][j] = C[(N * 2 + idx) * L_half * 2 + j];
-        }
-        __syncthreads();
-
-        if (true){
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
-            uint32_t t0_value, t1_value;
-            if (threadIdx.y < warp_per_group * 2){
-                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                c0_value = r[0][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                c1_value = r[0][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                t0_value = r[1][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                t1_value = r[1][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-            }
-            batch_mul_sub3_64_grouped_warp<BLOCK_SIZE>(
-                r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
-                threadIdx.y, warp_per_group * 2, threadIdx.y < warp_per_group * 2,
-                reinterpret_cast<ushort2*>(carry_prop)
-            );
-            if (threadIdx.y < warp_per_group * 2){
-                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L_half * 2){
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
-                }
-            }
-            __syncthreads();
-        }
+        int j_idx = threadIdx.y * BLOCK_SIZE + threadIdx.x;
 
         uint32_t r0_value, r1_value;
         uint32_t c0_value, c1_value;
-        if (threadIdx.y < warp_per_group){
-            r0_value = (j_idx * 2 < L_split) ? r[1][j_idx * 2 + L_split] : 0;
-            r1_value = (j_idx * 2 + 1 < L_split) ? r[1][j_idx * 2 + 1 + L_split] : 0;
-            c0_value = (j_idx * 2 < L_split) ? r[2][j_idx * 2] : 0xffffffff;
-            c1_value = (j_idx * 2 + 1 < L_split) ? r[2][j_idx * 2 + 1] : 0xffffffff;
-        }else if (threadIdx.y < warp_per_group * 2){
-            r0_value = (j_idx * 2 < L_half * 2 - L_split) ? r[2][j_idx * 2 + L_split] : 0;
-            r1_value = (j_idx * 2 + 1 < L_half * 2 - L_split) ? r[2][j_idx * 2 + 1 + L_split] : 0;
-            c0_value = (j_idx * 2 < L_half * 2 - L_split) ? r[0][j_idx * 2] : 0xffffffff;
-            c1_value = (j_idx * 2 + 1 < L_half * 2 - L_split) ? r[0][j_idx * 2 + 1] : 0xffffffff;
+        uint32_t t0_value, t1_value;
+        if (j_idx * 2 < L_half * 2){
+            r0_value = C[(N * 2 + idx) * L_half * 2 + j_idx * 2];
+            r1_value = C[(N * 2 + idx) * L_half * 2 + j_idx * 2 + 1];
+            c0_value = C[(N + idx) * L_half * 2 + j_idx * 2];
+            c1_value = C[(N + idx) * L_half * 2 + j_idx * 2 + 1];
+            t0_value = C[idx * L_half * 2 + j_idx * 2];
+            t1_value = C[idx * L_half * 2 + j_idx * 2 + 1];
+            r[0][j_idx * 2] = c0_value;
+            r[0][j_idx * 2 + 1] = c1_value;
+            r[1][j_idx * 2] = t0_value;
+            r[1][j_idx * 2 + 1] = t1_value;
+            if (j_idx * 2 < L_split * 2){
+                ret[idx * L_total * 2 + j_idx * 2] = c0_value;
+                ret[idx * L_total * 2 + j_idx * 2 + 1] = c1_value;
+            }
+        }
+        batch_mul_sub3_64_grouped_warp<BLOCK_SIZE>(
+            r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
+            threadIdx.y, warp_per_group * 2, threadIdx.y < warp_per_group * 2,
+            reinterpret_cast<ushort2*>(carry_prop)
+        );
+
+        if (j_idx * 2 >= L_half * 2){
+            r0_value = 0;
+            r1_value = 0;
+        }
+        if (j_idx * 2 < L_split){
+            c0_value = r[0][j_idx * 2 + L_split];
+        }else if (j_idx * 2 - L_split < L_half * 2){
+            c0_value = r[1][j_idx * 2 - L_split];
         }else{
-            r0_value = (j_idx * 2 < L_total * 2 - L_split - L_half * 2) ? r[0][j_idx * 2 - L_split + L_half * 2] : 0;
-            r1_value = (j_idx * 2 + 1 < L_total * 2 - L_split - L_half * 2) ? r[0][j_idx * 2 + 1 - L_split + L_half * 2] : 0;
             c0_value = 0;
+        }
+        if (j_idx * 2 + 1 < L_split){
+            c1_value = r[0][j_idx * 2 + 1 + L_split];
+        }else if (j_idx * 2 + 1 - L_split < L_half * 2){
+            c1_value = r[1][j_idx * 2 + 1 - L_split];
+        }else{
             c1_value = 0;
         }
-
         batch_mul_add_64_all_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value, carry_prop);
 
-        if (threadIdx.y < warp_per_group){
-            if (j_idx * 2 < L_split){
-                r[1][j_idx * 2 + L_split] = r0_value;
-            }
-            if (j_idx * 2 + 1 < L_split){
-                r[1][j_idx * 2 + 1 + L_split] = r1_value;
-            }
-        }else if (threadIdx.y < warp_per_group * 2){
-            if (j_idx * 2 < L_half * 2 - L_split){
-                r[0][j_idx * 2] = r0_value;
-            }
-            if (j_idx * 2 + 1 < L_half * 2 - L_split){
-                r[0][j_idx * 2 + 1] = r1_value;
-            }
-        }else{
-            if (j_idx * 2 < L_total * 2 - L_split - L_half * 2){
-                r[0][j_idx * 2 - L_split + L_half * 2] = r0_value;
-            }
-            if (j_idx * 2 + 1 < L_total * 2 - L_split - L_half * 2){
-                r[0][j_idx * 2 + 1 - L_split + L_half * 2] = r1_value;
-            }
+        if (j_idx * 2 + L_split < L_total * 2){
+            ret[idx * L_total * 2 + j_idx * 2 + L_split] = r0_value;
         }
-        __syncthreads();
-
-        if (threadIdx.y < warp_per_group){
-            for (int j = j_idx; j < L_split * 2; j += BLOCK_SIZE * warp_per_group){
-                ret[idx * L_total * 2 + j] = r[1][j];
-            }
-        }else if (threadIdx.y < warp_per_group * 2){
-            for (int j = j_idx; j < L_total * 2 - L_split * 2; j += BLOCK_SIZE * warp_per_group){
-                ret[idx * L_total * 2 + L_split * 2 + j] = r[0][j];
-            }
+        if (j_idx * 2 + 1 + L_split < L_total * 2){
+            ret[idx * L_total * 2 + j_idx * 2 + 1 + L_split] = r1_value;
         }
         __syncthreads();
     }
