@@ -59,7 +59,6 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
     __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 2 / BLOCK_SIZE + 1];
     int warp_per_group = (L_half + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
     int j_idx = (threadIdx.y % warp_per_group) * BLOCK_SIZE + threadIdx.x;
-    const unsigned int warp_mask = (1ull << BLOCK_SIZE) - 1;
 
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
         for (int j = threadIdx.x + threadIdx.y * BLOCK_SIZE; j < L_half * 2; j += blockDim.y * BLOCK_SIZE){
@@ -69,7 +68,7 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
         }
         __syncthreads();
 
-        /*if (true){
+        if (true){
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
             uint32_t t0_value, t1_value;
@@ -87,70 +86,6 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
                 reinterpret_cast<ushort2*>(carry_prop)
             );
             if (threadIdx.y < warp_per_group * 2){
-                if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L_half * 2){
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
-                    r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;
-                }
-            }
-            __syncthreads();
-        }*/
-
-        for (int si = 0; si < 2; si ++){
-            uint32_t borrow_state;
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value=1, c1_value;
-            if (threadIdx.y < warp_per_group * 2){
-                r0_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                r1_value = r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                c0_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0];
-                c1_value = r[si][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1];
-                r0_value = sub_cc(r0_value, c0_value);
-                r1_value = subc_cc(r1_value, c1_value);
-                borrow_state = -subc(0, 0); // 0 or 1
-                sub_cc(r0_value, 1);
-                subc_cc(r1_value, 0);
-                borrow_state = (borrow_state << 1) -subc(0, 0);
-                // borrow_state:  0   no borrow    2  borrow    1  depends on previous
-                for (int delta = 1; delta < BLOCK_SIZE; delta *= 2){
-                    uint32_t prev_borrow = __shfl_up_sync(warp_mask, borrow_state, delta, BLOCK_SIZE);
-                    if (borrow_state == 1){
-                        borrow_state = prev_borrow;
-                    }
-                }
-                if (threadIdx.x == BLOCK_SIZE - 1){
-                    carry_prop[threadIdx.y] = borrow_state;
-                }
-            }
-            __syncthreads();
-            if (threadIdx.y == 0 && threadIdx.x == 0){
-                if (carry_prop[0] == 1){
-                    carry_prop[0] = 0;
-                }
-                for (int i = 1; i < warp_per_group * 2 - 1; i++){
-                    if (carry_prop[i] == 1){
-                        carry_prop[i] = carry_prop[i - 1];
-                    }
-                }
-            }
-            __syncthreads();
-            if (threadIdx.y < warp_per_group * 2){
-                if (borrow_state == 1){
-                    if (threadIdx.y > 0){
-                        borrow_state = carry_prop[threadIdx.y - 1];
-                    }else{
-                        borrow_state = 0;
-                    }
-                }
-                borrow_state = __shfl_up_sync(warp_mask, borrow_state, 1, BLOCK_SIZE);
-                if (threadIdx.x == 0){
-                    if (threadIdx.y == 0){
-                        borrow_state = 0;
-                    }else{
-                        borrow_state = carry_prop[threadIdx.y - 1];
-                    }
-                }
-                r0_value = sub_cc(r0_value, borrow_state >> 1);
-                r1_value = subc_cc(r1_value, 0);
                 if (threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0 < L_half * 2){
                     r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 0] = r0_value;
                     r[2][threadIdx.y * BLOCK_SIZE * 2 + threadIdx.x * 2 + 1] = r1_value;

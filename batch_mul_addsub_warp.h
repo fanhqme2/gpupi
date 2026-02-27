@@ -289,7 +289,6 @@ __device__ __forceinline__ void batch_mul_add3_64_grouped_warp(
     }
     __syncthreads();
     if (is_active && rank == 0 && threadIdx.x == 0){
-        carry_prop[0].y = 0;
         for (int i = 1; i < group_size - 1; i ++){
             carry_prop[i].x += (carry_prop[i].y + carry_prop[i - 1].x) >> 2;
         }
@@ -344,10 +343,12 @@ __device__ __forceinline__ void batch_mul_sub3_64_grouped_warp(
                 }
             }
         }
+        if (threadIdx.x == BLOCK_SIZE - 1){
+            carry_prop[rank] = borrow;
+        }
     }
     __syncthreads();
     if (is_active && rank == 0 && threadIdx.x == 0){
-        carry_prop[0].y = 0;
         for (int i = 1; i < group_size - 1; i ++){
             carry_prop[i].x += (carry_prop[i].y + carry_prop[i - 1].x) >> 2;
         }
