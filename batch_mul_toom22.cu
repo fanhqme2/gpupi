@@ -51,6 +51,70 @@ __global__ void batch_mul_toom22_transform_kernel(
 }
 
 template<int BLOCK_SIZE>
+__global__ void batch_mul_toom22_transformlv2_kernel(
+    const uint32_t * A, const uint32_t * B,
+    uint32_t * A_out, uint32_t * B_out,
+    int N, int L_total, int L_split2, int L_half
+) {
+    const uint32_t * src = (blockIdx.y == 0) ? A : B;
+    uint32_t * dst = (blockIdx.y == 0) ? A_out : B_out;
+    int j_idx = (threadIdx.y * BLOCK_SIZE + threadIdx.x) * 2;
+    __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / 4 / BLOCK_SIZE + 1];
+    __shared__ uint32_t Cs[3][512];
+    int L_split4 = (L_half + 1) >> 1;
+    int L_quad = L_split4 + 1;
+    int needed_warps = (L_quad + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
+    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
+        uint32_t r0_value, r1_value;
+        uint32_t c0_value, c1_value;
+        r0_value = (j_idx < L_split2) ? src[idx * L_total + j_idx] : 0;
+        r1_value = (j_idx + 1 < L_split2) ? src[idx * L_total + j_idx + 1] : 0;
+        c0_value = (j_idx + L_split2 < L_total) ? src[idx * L_total + j_idx + L_split2] : 0;
+        c1_value = (j_idx + L_split2 + 1 < L_total) ? src[idx * L_total + j_idx + L_split2 + 1] : 0;
+        if (j_idx < L_half){
+            Cs[0][j_idx] = c0_value;
+            Cs[0][j_idx + 1] = c1_value;
+            Cs[1][j_idx] = r0_value;
+            Cs[1][j_idx + 1] = r1_value;
+        }
+        batch_mul_add_64_all_warp<BLOCK_SIZE>(r0_value, r1_value, c0_value, c1_value,carry_prop);
+        if (j_idx < L_half){
+            Cs[2][j_idx] = r0_value;
+            Cs[2][j_idx + 1] = r1_value;
+        }
+        __syncthreads();
+        for (int si = 0; si < 3; si ++){
+            r0_value = (j_idx < L_split4) ? Cs[si][j_idx] : 0;
+            r1_value = (j_idx + 1 < L_split4) ? Cs[si][j_idx + 1] : 0;
+            c0_value = (j_idx + L_split4 < L_half) ? Cs[si][j_idx + L_split4] : 0;
+            c1_value = (j_idx + L_split4 + 1 < L_half) ? Cs[si][j_idx + L_split4 + 1] : 0;
+            if (j_idx < L_quad){
+                dst[((0 * 3 + si) * N + idx) * L_quad + j_idx] = c0_value;
+                dst[((1 * 3 + si) * N + idx) * L_quad + j_idx] = r0_value;
+            }
+            if (j_idx + 1 < L_quad){
+                dst[((0 * 3 + si) * N + idx) * L_quad + j_idx + 1] = c1_value;
+                dst[((1 * 3 + si) * N + idx) * L_quad + j_idx + 1] = r1_value;
+            }
+            batch_mul_add_64_grouped_warp<BLOCK_SIZE>(
+                r0_value, r1_value, c0_value, c1_value,
+                threadIdx.y, needed_warps, threadIdx.y < needed_warps,
+                carry_prop
+            );
+            if (j_idx < L_quad){
+                dst[((2 * 3 + si) * N + idx) * L_quad + j_idx] = r0_value;
+            }
+            if (j_idx + 1 < L_quad){
+                dst[((2 * 3 + si) * N + idx) * L_quad + j_idx + 1] = r1_value;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// put three multiplication results together
+// ret = r[1] + (r[2] - r[0] - r[1]) * x^L_split + r[0] * x^(2*L_split)
+template<int BLOCK_SIZE>
 __global__ void batch_mul_toom22_reconstruct_kernel(
     uint32_t * ret,
     const uint32_t * C,
@@ -114,6 +178,141 @@ __global__ void batch_mul_toom22_reconstruct_kernel(
         }
         if (j_idx * 2 + 1 + L_split < L_total * 2){
             ret[idx * L_total * 2 + j_idx * 2 + 1 + L_split] = r1_value;
+        }
+        __syncthreads();
+    }
+}
+
+template<int BLOCK_SIZE>
+__global__ void batch_mul_toom22_reconstructlv2_kernel(
+    uint32_t * ret,
+    const uint32_t * C,
+    int N, int L_total, int L_split2, int L_half
+) {
+
+    __shared__ uint32_t carry_prop[BATCH_MUL_TOOM22_L_MAX / BLOCK_SIZE + 1];
+    __shared__ uint32_t Cs[3][1024];
+
+    int L_split4 = (L_half + 1) >> 1;
+    int L_quad = L_split4 + 1;
+
+    int participating_warps = (L_half * 2 + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
+    int participating_warps2 = (L_quad * 2 + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
+    int participating_warps3 = (L_split4 + L_quad * 2 + BLOCK_SIZE * 2 - 1) / (BLOCK_SIZE * 2);
+
+    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
+        int j_idx = threadIdx.y * BLOCK_SIZE + threadIdx.x;
+
+        uint32_t r0_value, r1_value;
+        uint32_t c0_value, c1_value;
+        uint32_t t0_value, t1_value;
+        uint32_t s0_value, s1_value;
+
+        for (int si = 0; si < 3; si ++){
+            if (j_idx * 2 < L_quad * 2){
+                r0_value = C[((2 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2];
+                r1_value = C[((2 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 + 1];
+                c0_value = C[((1 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2];
+                c1_value = C[((1 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 + 1];
+                t0_value = C[((0 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2];
+                t1_value = C[((0 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 + 1];
+            }else{
+                r0_value = 0;
+                r1_value = 0;
+                c0_value = 0;
+                c1_value = 0;
+                t0_value = 0;
+                t1_value = 0;
+            }
+            if (j_idx * 2 < L_split4){
+                s0_value = C[((1 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 + L_split4];
+            }else if (j_idx * 2 - L_split4 < L_quad * 2){
+                s0_value = C[((0 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 - L_split4];
+            }else{
+                s0_value = 0;
+            }
+            if (j_idx * 2 + 1 < L_split4){
+                s1_value = C[((1 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 + 1 + L_split4];
+            }else if (j_idx * 2 + 1 - L_split4 < L_quad * 2){
+                s1_value = C[((0 * 3 + si) * N + idx) * L_quad * 2 + j_idx * 2 + 1 - L_split4];
+            }else{
+                s1_value = 0;
+            }
+
+            if (j_idx * 2 < L_split4 * 2){
+                Cs[si][j_idx * 2] = c0_value;
+                Cs[si][j_idx * 2 + 1] = c1_value;
+            }
+                    
+            batch_mul_sub3_64_grouped_warp<BLOCK_SIZE>(
+                r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
+                threadIdx.y, participating_warps2, threadIdx.y < participating_warps2,
+                reinterpret_cast<ushort2*>(carry_prop)
+            );
+
+            batch_mul_add_64_grouped_warp<BLOCK_SIZE>(
+                r0_value, r1_value, s0_value, s1_value,
+                threadIdx.y, participating_warps3, threadIdx.y < participating_warps3,
+                carry_prop
+            );
+
+            if (j_idx * 2 + L_split4 < L_half * 2){
+                Cs[si][j_idx * 2 + L_split4] = r0_value;
+            }
+            if (j_idx * 2 + 1 + L_split4 < L_half * 2){
+                Cs[si][j_idx * 2 + 1 + L_split4] = r1_value;
+            }
+            __syncthreads();
+        }
+
+        if (j_idx * 2 < L_half * 2){
+            r0_value = Cs[2][j_idx * 2];
+            r1_value = Cs[2][j_idx * 2 + 1];
+            c0_value = Cs[1][j_idx * 2];
+            c1_value = Cs[1][j_idx * 2 + 1];
+            t0_value = Cs[0][j_idx * 2];
+            t1_value = Cs[0][j_idx * 2 + 1];
+        }else{
+            r0_value = 0;
+            r1_value = 0;
+            c0_value = 0;
+            c1_value = 0;
+            t0_value = 0;
+            t1_value = 0;
+        }
+        if (j_idx * 2 < L_split2){
+            s0_value = Cs[1][j_idx * 2 + L_split2];
+        }else if (j_idx * 2 - L_split2 < L_half * 2){
+            s0_value = Cs[0][j_idx * 2 - L_split2];
+        }else{
+            s0_value = 0;
+        }
+        if (j_idx * 2 + 1 < L_split2){
+            s1_value = Cs[1][j_idx * 2 + 1 + L_split2];
+        }else if (j_idx * 2 + 1 - L_split2 < L_half * 2){
+            s1_value = Cs[0][j_idx * 2 + 1 - L_split2];
+        }else{
+            s1_value = 0;
+        }
+
+        if (j_idx * 2 < L_split2 * 2){
+            ret[idx * L_total * 2 + j_idx * 2] = c0_value;
+            ret[idx * L_total * 2 + j_idx * 2 + 1] = c1_value;
+        }
+                
+        batch_mul_sub3_64_grouped_warp<BLOCK_SIZE>(
+            r0_value, r1_value, c0_value, c1_value, t0_value, t1_value,
+            threadIdx.y, participating_warps, threadIdx.y < participating_warps,
+            reinterpret_cast<ushort2*>(carry_prop)
+        );
+
+        batch_mul_add_64_all_warp<BLOCK_SIZE>(r0_value, r1_value, s0_value, s1_value, carry_prop);
+
+        if (j_idx * 2 + L_split2 < L_total * 2){
+            ret[idx * L_total * 2 + j_idx * 2 + L_split2] = r0_value;
+        }
+        if (j_idx * 2 + 1 + L_split2 < L_total * 2){
+            ret[idx * L_total * 2 + j_idx * 2 + 1 + L_split2] = r1_value;
         }
         __syncthreads();
     }
@@ -589,7 +788,9 @@ __global__ void batch_mul_toom22_directlv2_kernel(uint32_t * A, uint32_t * B, ui
     }
 }
 
-static const int BATCH_MUL_TOOM22_LV2_MAX = (64 - 1) * 4; // 252
+static const int BATCH_MUL_TOOM22_LV2_MAX = (64 - 1) * 4; // 252.
+static const int BATCH_MUL_TOOM22_LV3_MAX = (BATCH_MUL_TOOM22_LV2_MAX - 1) * 2; // 502
+
 
 // Internal recursive function
 static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret, 
@@ -620,28 +821,47 @@ static void batch_mul_toom22_internal(uint32_t * A, uint32_t * B, uint32_t * ret
             A, B, ret, N, L
         );
     }else{
-        uint32_t * A_combined = workspace;
-        uint32_t * B_combined = A_combined + (size_t)3 * N * L_half;
-        C_combined = B_combined + (size_t)3 * N * L_half;
-        uint32_t * next_workspace = C_combined + (size_t)3 * N * c_size;
-
         int num_blocks = N;
         if (num_blocks > 65536) num_blocks = 65536;
-        int num_warps = (L_half + 64 - 1) / 64;
-        batch_mul_toom22_transform_kernel<32><<<dim3(num_blocks, 2, 1), dim3(32, num_warps, 1)>>>(
-            A, B, A_combined, B_combined, N, L, L_split, L_half
-        );
-        
-        // Single recursive call with 3N instances
-        batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * N, L_half);     
 
-        int num_blocks_2 = N;
-        if (num_blocks_2 > 65536) num_blocks_2 = 65536;
-        int num_warps_2 = (L_split + L_half * 2 + 64 - 1) / 64;
-        batch_mul_toom22_reconstruct_kernel<32><<<num_blocks_2, dim3(32, num_warps_2, 1)>>>(
-            ret, C_combined, N, L, L_split, L_half
-        );
+        if (L <= BATCH_MUL_TOOM22_LV3_MAX){
+            uint32_t * A_combined = workspace;
+            uint32_t * B_combined = A_combined + (size_t)3 * N * L_half;
+            C_combined = B_combined + (size_t)3 * N * L_half;
+            uint32_t * next_workspace = C_combined + (size_t)3 * N * c_size;
+            
+            int num_warps = (L_half + 64 - 1) / 64;
+            batch_mul_toom22_transform_kernel<32><<<dim3(num_blocks, 2, 1), dim3(32, num_warps, 1)>>>(
+                A, B, A_combined, B_combined, N, L, L_split, L_half
+            );
+            
+            // Single recursive call with 3N instances
+            batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 3 * N, L_half);     
 
+            int num_warps_2 = (L_split + L_half * 2 + 64 - 1) / 64;
+            batch_mul_toom22_reconstruct_kernel<32><<<num_blocks, dim3(32, num_warps_2, 1)>>>(
+                ret, C_combined, N, L, L_split, L_half
+            );
+        }else{
+            int L_split4 = (L_half + 1) >> 1;
+            int L_quad = L_split4 + 1;
+            uint32_t * A_combined = workspace;
+            uint32_t * B_combined = A_combined + (size_t)9 * N * L_quad;
+            C_combined = B_combined + (size_t)9 * N * L_quad;
+            uint32_t * next_workspace = C_combined + (size_t)9 * N * L_quad * 2;
+
+            int num_warps = (L_half + 64 - 1) / 64;
+            batch_mul_toom22_transformlv2_kernel<32><<<dim3(num_blocks, 2, 1), dim3(32, num_warps, 1)>>>(
+                A, B, A_combined, B_combined, N, L, L_split, L_half
+            );
+
+            batch_mul_toom22_internal(A_combined, B_combined, C_combined, next_workspace, 9 * N, L_quad);
+
+            int num_warps_2 = (L_split + L_half * 2 + 64 - 1) / 64;
+            batch_mul_toom22_reconstructlv2_kernel<32><<<num_blocks, dim3(32, num_warps_2, 1)>>>(
+                ret, C_combined, N, L, L_split, L_half
+            );
+        }
     }
 }
 
@@ -657,12 +877,17 @@ static size_t workspace_size_words_internal(int N, int L) {
 
     size_t total = 0;
 
-    if (L > BATCH_MUL_TOOM22_LV2_MAX) {
+    if (L > BATCH_MUL_TOOM22_LV3_MAX) {
+        int L_split4 = (L_half + 1) >> 1;
+        int L_quad = L_split4 + 1;
+        total += (size_t)9 * N * L_quad * 2; // A_combined + B_combined
+        total += (size_t)9 * N * L_quad * 2; // C_combined
+        total += workspace_size_words_internal(9 * N, L_quad);
+    } else if (L > BATCH_MUL_TOOM22_LV2_MAX) {
         total += (size_t)3 * N * L_half * 2; // A_combined + B_combined
         total += (size_t)3 * N * c_size; // C_combined
+        total += workspace_size_words_internal(3 * N, L_half);
     }
-    
-    total += workspace_size_words_internal(3 * N, L_half);
     return total;
 }
 
