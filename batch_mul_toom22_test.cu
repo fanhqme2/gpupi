@@ -234,7 +234,7 @@ int main() {
     long long target = 100000000LL; // 1e8
     
     // Benchmark with specified L values: 481, 241, 121, 65
-    int benchmark_L[] = {65, 121, 241, 481};
+    int benchmark_L[] = {65, 121, 241, 481, 961};
     int num_benchmarks = sizeof(benchmark_L) / sizeof(benchmark_L[0]);
     
     for (int i = 0; i < num_benchmarks; i++) {
@@ -252,19 +252,23 @@ int main() {
 
 /*
 Benchmarking L=65, N=1538461 (N*L=99999965)...
-  Average time: 2.667 ms
-  Multiplications per second: 576.96 million
-  Effective bandwidth: 300.02 GB/s
+  Average time: 2.664 ms
+  Multiplications per second: 577.40 million
+  Effective bandwidth: 300.25 GB/s
 Benchmarking L=121, N=826446 (N*L=99999966)...
-  Average time: 2.315 ms
-  Multiplications per second: 357.01 million
-  Effective bandwidth: 345.58 GB/s
+  Average time: 2.305 ms
+  Multiplications per second: 358.48 million
+  Effective bandwidth: 347.01 GB/s
 Benchmarking L=241, N=414937 (N*L=99999817)...
-  Average time: 4.056 ms
-  Multiplications per second: 102.31 million
-  Effective bandwidth: 197.25 GB/s
+  Average time: 4.055 ms
+  Multiplications per second: 102.34 million
+  Effective bandwidth: 197.30 GB/s
 Benchmarking L=481, N=207900 (N*L=99999900)...
-  Average time: 8.491 ms
-  Multiplications per second: 24.49 million
-  Effective bandwidth: 94.22 GB/s
+  Average time: 8.503 ms
+  Multiplications per second: 24.45 million
+  Effective bandwidth: 94.09 GB/s
+Benchmarking L=961, N=104058 (N*L=99999738)...
+  Average time: 12.944 ms
+  Multiplications per second: 8.04 million
+  Effective bandwidth: 61.81 GB/s
 */
