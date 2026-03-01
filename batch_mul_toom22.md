@@ -51,10 +51,14 @@ Given `(N, L)`:
    - `L_half = L_split + 1`
 3. If `L_half <= BATCH_MUL_DIRECT_L_MAX`, run `batch_mul_toom22_directlv1_kernel<32>` with block `(32, 3, 1)`.
 4. Else if `L <= BATCH_MUL_TOOM22_LV2_MAX` (`252`), run `batch_mul_toom22_directlv2_kernel<32>` with block `(32, 9, 1)`.
-5. Else run recursive path:
+5. Else if `L <= BATCH_MUL_TOOM22_LV3_MAX` (`502`), run the standard recursive path:
    - transform (`A,B -> A_combined,B_combined`)
    - recursive multiply on `3N` instances of size `L_half`
    - reconstruct to size `2L`
+6. Else run the fused level-2 recursive path:
+   - fused transform (`A,B -> 9N` instances of size `L_quad`)
+   - recursive multiply on `9N` instances of size `L_quad`
+   - fused reconstruct back to size `2L`
 
 `L_half` is rounded up to a multiple of 4 only when `L_half <= BATCH_MUL_DIRECT_L_MAX` (to help direct kernel alignment).
 
@@ -78,6 +82,11 @@ They use warp shuffles, so every lane in a participating warp must execute the s
 
 # Recursive Path Details
 
+There are now two recursive layouts:
+
+- standard Toom-2 recursion for `253 <= L <= 502`
+- fused two-level Toom-2 recursion for `L >= 503`
+
 ## Transform Kernel (`batch_mul_toom22_transform_kernel`)
 
 Inputs are split into:
@@ -96,6 +105,27 @@ Layout:
 - `A_out = [A0, A1, A2]` where each group has `N * L_half` words
 - `B_out = [B0, B1, B2]` similarly
 
+## Fused Level 2 Transform (`batch_mul_toom22_transformlv2_kernel`)
+
+This kernel is equivalent to running `batch_mul_toom22_transform_kernel` twice in succession, but keeps the intermediate 3-way split in shared memory.
+
+Definitions:
+
+- `L_split2 = ceil(L / 2)`
+- `L_half = L_split2 + 1`
+- `L_split4 = ceil(L_half / 2)`
+- `L_quad = L_split4 + 1`
+
+For each input instance it produces 9 transformed children of length `L_quad`.
+
+Important layout detail:
+
+- the `9N` outputs are stored in second-pass bucket-major order:
+  - `[child00, child01, child02, child10, child11, child12, child20, child21, child22]`
+  - equivalently, destination index is `(outer_bucket * 3 + inner_bucket)`
+
+This ordering matches two consecutive calls to `batch_mul_toom22_transform_kernel`, which is what the fused kernel was validated against.
+
 ## Reconstruct Kernel (`batch_mul_toom22_reconstruct_kernel`)
 
 Given:
@@ -113,6 +143,19 @@ The kernel performs:
 1. Two subtract rounds on `c2` (subtract `c0`, then `c1`) with borrow propagation.
 2. Carry-aware stitched additions into the final output windows.
 3. Final writeback to `ret`.
+
+## Fused Level 2 Reconstruct (`batch_mul_toom22_reconstructlv2_kernel`)
+
+This kernel is equivalent to running `batch_mul_toom22_reconstruct_kernel` twice:
+
+1. reconstruct 9 quarter-size products into 3 half-size products
+2. reconstruct those 3 half-size products into the final `2L` result
+
+Like the fused transform, it assumes the `9N` level-2 products are laid out in second-pass bucket-major order:
+
+- `[(0*3+0), (0*3+1), (0*3+2), (1*3+0), ... , (2*3+2)]`
+
+The kernel first reconstructs each of the three second-level groups into shared memory (`Cs[0..2]`), then applies the ordinary top-level Toom-2 reconstruction from those three shared buffers into `ret`.
 
 # Direct Level 1 Kernel (`batch_mul_toom22_directlv1_kernel`)
 
@@ -177,10 +220,14 @@ After 9 pointwise products (`r[0..8]`):
 
 1. Returns 0 when `L <= BATCH_MUL_DIRECT_L_MAX`.
 2. Computes `L_split`, `L_half` (with same alignment rule), `c_size = 2 * L_half`.
-3. If `L > BATCH_MUL_TOOM22_LV2_MAX`, adds:
+3. If `L > BATCH_MUL_TOOM22_LV3_MAX`, adds fused level-2 storage:
+   - `9 * N * L_quad * 2` words (`A_combined + B_combined`)
+   - `9 * N * L_quad * 2` words (`C_combined`)
+   - recursive workspace for `(9N, L_quad)`
+4. Else if `L > BATCH_MUL_TOOM22_LV2_MAX`, adds standard recursive storage:
    - `3 * N * L_half * 2` words (`A_combined + B_combined`)
    - `3 * N * c_size` words (`C_combined`)
-4. Adds recursive workspace for `(3N, L_half)`.
+   - recursive workspace for `(3N, L_half)`
 
 Public API `batch_mul_toom22_workspace_size(N, L)` applies this to one chunk (`chunk_N = get_N_max(N, L)`) and returns bytes.
 
@@ -189,11 +236,12 @@ Public API `batch_mul_toom22_workspace_size(N, L)` applies this to one chunk (`c
 `batch_mul_toom22_test.cu` does:
 
 - randomized correctness across small/medium/large `(N, L)` ranges
-- benchmark at `L = 65, 121, 241, 481` with `N*L ~= 1e8`
+- benchmark at `L = 65, 121, 241, 481, 961` with `N*L ~= 1e8`
 
 Latest recorded benchmark comment in test file:
 
-- `L=65`: `2.716 ms`
-- `L=121`: `2.364 ms`
-- `L=241`: `4.192 ms`
-- `L=481`: `8.714 ms`
+- `L=65`: `2.664 ms`
+- `L=121`: `2.305 ms`
+- `L=241`: `4.055 ms`
+- `L=481`: `8.503 ms`
+- `L=961`: `12.944 ms`
