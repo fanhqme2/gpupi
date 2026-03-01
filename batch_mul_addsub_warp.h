@@ -295,6 +295,10 @@ __device__ __forceinline__ void batch_mul_add3_64_grouped_warp(
     }
     __syncthreads();
     if (is_active){
+        if (rank > 0){
+            ushort compound = carry_prop[rank - 1].x + carry.y;
+            carry.x += compound >> 2;
+        }
         carry = cuda::device::warp_shuffle_up<BLOCK_SIZE, ushort2>(carry, 1);
         if (threadIdx.x == 0){
             if (rank == 0){
@@ -355,6 +359,10 @@ __device__ __forceinline__ void batch_mul_sub3_64_grouped_warp(
     }
     __syncthreads();
     if (is_active){
+        if (rank > 0){
+            ushort compound = carry_prop[rank - 1].x + borrow.y;
+            borrow.x += compound >> 2;
+        }
         borrow = cuda::device::warp_shuffle_up<BLOCK_SIZE, ushort2>(borrow, 1);
         if (threadIdx.x == 0){
             if (rank == 0){
