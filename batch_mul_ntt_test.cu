@@ -155,9 +155,94 @@ static bool run_suite(
     return true;
 }
 
+static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_NL, NTTPrecomputedTables tables) {
+    uint32_t N = (uint32_t)(target_NL / L_a);
+    if (N == 0) N = 1;
+    const uint32_t L = L_a + L_b;
+
+    printf("Benchmarking L_a=%u, L_b=%u, N=%u (N*L_a=%llu)...\n",
+           L_a, L_b, N, (unsigned long long)((uint64_t)N * L_a));
+
+    const size_t size_A = (size_t)N * L_a * sizeof(uint32_t);
+    const size_t size_B = (size_t)N * L_b * sizeof(uint32_t);
+    const size_t size_ret = (size_t)N * L * sizeof(uint32_t);
+    const size_t workspace_size = batch_mul_ntt_workspace_size(N, L_a, L_b);
+
+    uint32_t* d_A = nullptr;
+    uint32_t* d_B = nullptr;
+    uint32_t* d_ret = nullptr;
+    uint32_t* d_workspace = nullptr;
+
+    cudaError_t err = cudaMalloc(&d_A, size_A);
+    if (err != cudaSuccess) {
+        printf("  SKIPPED (cudaMalloc d_A failed: %s)\n", cudaGetErrorString(err));
+        return;
+    }
+    err = cudaMalloc(&d_B, size_B);
+    if (err != cudaSuccess) {
+        printf("  SKIPPED (cudaMalloc d_B failed: %s)\n", cudaGetErrorString(err));
+        cudaFree(d_A);
+        return;
+    }
+    err = cudaMalloc(&d_ret, size_ret);
+    if (err != cudaSuccess) {
+        printf("  SKIPPED (cudaMalloc d_ret failed: %s)\n", cudaGetErrorString(err));
+        cudaFree(d_A);
+        cudaFree(d_B);
+        return;
+    }
+    if (workspace_size > 0) {
+        err = cudaMalloc(&d_workspace, workspace_size);
+        if (err != cudaSuccess) {
+            printf("  SKIPPED (cudaMalloc workspace failed: %s)\n", cudaGetErrorString(err));
+            cudaFree(d_A);
+            cudaFree(d_B);
+            cudaFree(d_ret);
+            return;
+        }
+    }
+
+    // Warmup
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const int iterations = 10;
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int i = 0; i < iterations; ++i) {
+        batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
+    }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float milliseconds = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    const double avg_ms = milliseconds / iterations;
+
+    const double mul_per_sec_thousand = ((double)N / (avg_ms * 1e-3)) / 1e3;
+    const double io_words = (double)N * (double)(L_a + L_b + L);
+    const double bandwidth_gb_s = (io_words * sizeof(uint32_t)) / (avg_ms * 1e-3) / 1e9;
+
+    printf("  Average time: %.3f ms\n", avg_ms);
+    printf("  Multiplications per second: %.2f thousand\n", mul_per_sec_thousand);
+    printf("  Approx. bandwidth (A+B+ret): %.2f GB/s\n", bandwidth_gb_s);
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_ret));
+    if (d_workspace) CUDA_CHECK(cudaFree(d_workspace));
+}
+
 int main() {
     std::mt19937_64 rng(100ull);
     bool all_passed = true;
+    const uint64_t target_NL = 100000000ull; // keep N * L_a around 1e8
 
     uint3* d_lv1 = nullptr;
     uint3* d_lv2 = nullptr;
@@ -185,6 +270,21 @@ int main() {
     if (!all_passed) goto done;
 
     all_passed = run_suite("Large size tests (N*(L_a+L_b) ~ 1e7):", 10000000u, 3, true, tables, rng) && all_passed;
+    printf("\n");
+    if (!all_passed) goto done;
+
+    printf("=== Benchmark Tests ===\n\n");
+    for (uint32_t e = 9; e <= 25; ++e) {
+        
+        uint32_t L_a = 1u << e;
+        uint32_t L_b = L_a;
+        benchmark_configuration(L_a, L_b, target_NL, tables);
+
+        
+        if (e <= 20 && e >= 10){
+            e += 3;
+        }
+    }
     printf("\n");
 
 done:
