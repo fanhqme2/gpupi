@@ -454,7 +454,7 @@ void batch_mul_ntt(
         uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
         uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
 
-        // copy + pointwise mul time : 5.808
+        // copy + pointwise mul time : 5.808 ms
 
         if (true){
             const int threads_per_block = 512;
@@ -463,11 +463,11 @@ void batch_mul_ntt(
             copy_to_parts<<<num_blocks, threads_per_block>>>(parts_b, B, N, k, L_b);
         }
 
-        //if (L_a != 33554432){ // 113.006ms
+        //if (L_a != 33554432){ // 56.765 ms
 
         for (int i = 0; i < k; i ++){
             if (i + 1 < k){
-                const int threads_per_block = 512;
+                const int threads_per_block = 256;
                 int num_blocks = min(((((size_t)N) << (k - 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
                 fft_level_forward_radix4<<<num_blocks, threads_per_block>>>(
                     parts_a, // parts_b must be adjacent to it
@@ -495,11 +495,11 @@ void batch_mul_ntt(
             pointwise_mul<<<num_blocks, threads_per_block>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
         }
 
-        //if (L_a != 33554432){ // 55.454ms
+        //if (L_a != 33554432){ // 30.580ms
         
         for (int i = k - 1; i >= 0; i --){
             if (i - 1 > 0){
-                const int threads_per_block = 512;
+                const int threads_per_block = 256;
                 int num_blocks = min(((((size_t)N) << (k - 2)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
                 fft_level_backward_radix4<<<num_blocks, threads_per_block>>>(
                     parts_a,
@@ -520,7 +520,7 @@ void batch_mul_ntt(
 
         //}
 
-        //if (L_a != 33554432){ // 39.914ms
+        //if (L_a != 33554432){ // 39.777ms
 
         int threads_per_block = min(L, (size_t)1024);
         int num_blocks = min(N, 65536);
