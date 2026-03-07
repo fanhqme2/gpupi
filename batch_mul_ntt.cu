@@ -1,5 +1,6 @@
 #include "batch_mul_ntt.h"
 #include "batch_mul_addsub_asm.h"
+#include <cuda/warp>
 
 const uint32_t arr_root0 = 0x46038aeb;
 const uint32_t arr_root1 = 0x55c21a87;
@@ -130,5 +131,225 @@ __global__ void fill_in_power_table(uint3 * table, int n, uint3 root){
 void init_ntt_precomputed_tables(NTTPrecomputedTables * tables){
     fill_in_power_table<<<1, 1024>>>(tables->roots_table_lv1, 65536, make_uint3(arr_root0, arr_root1, arr_root2));
     fill_in_power_table<<<1, 1024>>>(tables->roots_table_lv2, 65536, make_uint3(arr_root65536_0, arr_root65536_1, arr_root65536_2));
-    fill_in_power_table<<<1, 32>>>(tables->inv2n_table, 32, make_uint3(arr_inv2_0, arr_inv2_1, arr_inv2_2));
+    fill_in_power_table<<<1, 32>>>(tables->inv2n_table, 33, make_uint3(arr_inv2_0, arr_inv2_1, arr_inv2_2));
+}
+
+__global__ void copy_to_parts(uint3 * parts, uint32_t * src, size_t N, int k, uint32_t L){
+    size_t K = ((size_t)1) << k;
+    for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < (N << k); i += blockDim.x * gridDim.x){
+        uint32_t val = 0;
+        size_t bid = i >> k;
+        size_t idx = i & (K - 1);
+        if (idx < L){
+            val = src[bid * L + idx];
+        }
+        parts[i] = make_uint3(val, 0, 0);
+    }
+}
+
+__global__ void fft_level_forward(uint3 * parts, int k, int i, uint3 * roots_table_lv1, uint3 * roots_table_lv2, size_t N){
+    uint32_t step = 1 << (k - 1 - i);
+    uint32_t seq_len = 1 << i;
+    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 1)); j += blockDim.x * gridDim.x){
+        size_t offset = (j >> (k - 1 - i)) << (k - i);
+        uint32_t seq_id = (j >> (k - 1 - i)) & (seq_len - 1);
+        uint32_t step_id = j & (step - 1);
+        uint32_t bitrev_seq_id = __brev((uint32_t)seq_id) >> (32 - i);
+        uint3 twiddle_factor = mul_mod(
+            roots_table_lv2[(bitrev_seq_id << (31 - i)) >> 16],
+            roots_table_lv1[(bitrev_seq_id << (31 - i)) & 0xffff]
+        );
+        uint3 u = parts[offset +        step_id];
+        uint3 v = parts[offset + step + step_id];
+        uint3 w = mul_mod(v, twiddle_factor);
+        v = sub_mod(u, w);
+        u = add_mod(u, w);
+        parts[offset +        step_id] = u;
+        parts[offset + step + step_id] = v;
+    }
+}
+
+__global__ void pointwise_mul(uint3 * parts_a, uint3 * parts_b, size_t total, uint3 * scalar_ptr){
+    uint3 scalar = scalar_ptr[0];
+    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < total; j += blockDim.x * gridDim.x){
+        parts_a[j] = mul_mod(mul_mod(parts_a[j], parts_b[j]), scalar);
+    }
+}
+
+__global__ void fft_level_backward(uint3 * parts, int k, int i, uint3 * roots_table_lv1, uint3 * roots_table_lv2, size_t N){
+    uint32_t step = 1 << (k - 1 - i);
+    uint32_t seq_len = 1 << i;
+    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 1)); j += blockDim.x * gridDim.x){
+        size_t offset = (j >> (k - 1 - i)) << (k - i);
+        uint32_t seq_id = (j >> (k - 1 - i)) & (seq_len - 1);
+        uint32_t step_id = j & (step - 1);
+        uint32_t bitrev_seq_id = __brev((uint32_t)seq_id) >> (32 - i);
+        uint3 twiddle_factor = mul_mod(
+            roots_table_lv2[(uint32_t)(-(bitrev_seq_id << (31 - i))) >> 16],
+            roots_table_lv1[(-(bitrev_seq_id << (31 - i))) & 0xffff]
+        );
+        uint3 u = parts[offset +        step_id];
+        uint3 v = parts[offset + step + step_id];
+        uint3 w = sub_mod(u, v);
+        u = add_mod(u, v);
+        v = mul_mod(w, twiddle_factor);
+        parts[offset +        step_id] = u;
+        parts[offset + step + step_id] = v;
+    }
+}
+
+__global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k, uint32_t L){
+    size_t L2 = ((size_t)L) * 2;
+    __shared__ ushort2 carryInfo[32];
+    parts += ((size_t)blockIdx.x) << k;
+    ret += ((size_t)blockIdx.x) * L * 2;
+    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
+        ushort block_carry = 0;
+        for (uint32_t i0 = 0; i0 < L; i0 += blockDim.x * blockDim.y){
+            uint32_t i = i0 + threadIdx.y * 32 + threadIdx.x;
+            uint32_t r0_value, r1_value;
+            uint32_t c0_value, c1_value;
+            uint32_t t0_value, t1_value;
+            r0_value = parts[((size_t)i) * 2].x;
+            r1_value = parts[((size_t)i) * 2 + 1].x;
+            c0_value = (i == 0) ? 0 : parts[((size_t)i) * 2 - 1].y;
+            c1_value = parts[((size_t)i) * 2].y;
+            t0_value = (i == 0) ? 0 : parts[((size_t)i) * 2 - 2].z;
+            t1_value = (i == 0) ? 0 : parts[((size_t)i) * 2 - 1].z;
+            ushort2 carry;
+            r0_value = add_cc(r0_value, c0_value);
+            r1_value = addc_cc(r1_value, c1_value);
+            carry.x = addc(0, 0);
+            r0_value = add_cc(r0_value, t0_value);
+            r1_value = addc_cc(r1_value, t1_value);
+            carry.x += addc(0, 0);
+            add_cc(r0_value, 2);
+            addc_cc(r1_value, 0);
+            if (addc(0, 0)){
+                carry.y = r0_value & 3;
+            }else{
+                carry.y = 0;
+            }
+            for (int delta = 1; delta < 32; delta *= 2){
+                ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
+                if (threadIdx.x >= delta){
+                    ushort compound = carry.y + carry_prev.x;
+                    carry.x += compound >> 2;
+                    if ((compound & 3) == 3){
+                        carry.y = carry_prev.y;
+                    }else{
+                        carry.y = 0;
+                    }
+                }
+            }
+            if (threadIdx.x == 32 - 1){
+                carryInfo[threadIdx.y] = carry;
+            }
+            __syncthreads();
+            if (threadIdx.y == 0){
+                ushort2 bc = carryInfo[threadIdx.x];
+                for (int delta = 1; delta < blockDim.y; delta *= 2){
+                    ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(bc, delta);
+                    if (threadIdx.x >= delta){
+                        ushort compound = bc.y + carry_prev.x;
+                        bc.x += compound >> 2;
+                        if ((compound & 3) == 3){
+                            bc.y = carry_prev.y;
+                        }else{
+                            bc.y = 0;
+                        }
+                    }
+                }
+                ushort compound = bc.y + block_carry;
+                bc.x += compound >> 2;
+                bc.y = 0;
+                carryInfo[threadIdx.x] = bc;
+            }
+            __syncthreads();
+            ushort compound = carry.y + ((threadIdx.y > 0) ? carryInfo[threadIdx.y - 1].x : block_carry);
+            carry.x += compound >> 2;
+            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
+            if (threadIdx.x == 0){
+                if (threadIdx.y == 0){
+                    carry.x = block_carry;
+                }else{
+                    carry.x = carryInfo[threadIdx.y - 1].x;
+                }
+            }
+            r0_value = add_cc(r0_value, (uint32_t)carry.x);
+            r1_value = addc_cc(r1_value, 0);
+            if (i < L){
+                ret[((size_t)i) * 2 + 0] = r0_value;
+                ret[((size_t)i) * 2 + 1] = r1_value;
+            }
+            block_carry = carryInfo[31].x;
+            __syncthreads();
+        }
+        parts += ((size_t)gridDim.x) << k;
+        ret += L2 * gridDim.x;
+    }
+}
+
+void batch_mul_ntt(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * workspace, NTTPrecomputedTables tables, uint32_t N, uint32_t L){
+    size_t K = 1;
+    int k = 0;
+    while (K < ((size_t)L) * 2){
+        K = K * 2;
+        k++;
+    }
+    uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
+    uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
+
+    copy_to_parts<<<170, 128>>>(parts_a, A, N, k, L);
+    copy_to_parts<<<170, 128>>>(parts_b, B, N, k, L);
+
+    for (int i = 0; i < k; i ++){
+        const int threads_per_block = 128;
+        int num_blocks = min(((((size_t)N) << (k + 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+        fft_level_forward<<<num_blocks, threads_per_block>>>(
+            parts_a, // parts_b must be adjacent to it
+            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+            N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
+        );
+    }
+
+    // fuse divide by K into pointwise mul
+    pointwise_mul<<<170, 128>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
+    
+    for (int i = k - 1; i >= 0; i --){
+        const int threads_per_block = 128;
+        int num_blocks = min(((((size_t)N) << (k + 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+        fft_level_backward<<<num_blocks, threads_per_block>>>(
+            parts_a,
+            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+            N
+        );
+    }
+    
+    /*uint32_t * parts_a_host = new uint32_t[K * 3];
+    cudaMemcpy(parts_a_host, parts_a, K * 3 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    printf("parts_a");
+    for (int i = 0; i < K * 3; i ++){
+        printf(" %08x", parts_a_host[i]);
+        if (i % 3 == 2){
+            printf(",");
+        }
+    }
+    printf("\n");
+    delete []parts_a_host;*/
+
+    if (true){
+        int threads_per_block = min(L, 1024);
+        int num_blocks = min(N, 65536);
+        add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
+    }
+}
+
+size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L){
+    size_t K = 1;
+    while (K < ((size_t)L) * 2){
+        K <<= 1;
+    }
+    // parts_a + parts_b, each is N*K uint3 values
+    return N * K * 2 * sizeof(uint3);
 }
