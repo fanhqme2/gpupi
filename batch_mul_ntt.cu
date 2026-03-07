@@ -257,8 +257,7 @@ __global__ void fft_level_backward(uint3 * parts, int k, int i, uint3 * roots_ta
         size_t offset = (j >> (k - 1 - i)) << (k - i);
         uint32_t seq_id = (j >> (k - 1 - i)) & (seq_len - 1);
         uint32_t step_id = j & (step - 1);
-        uint32_t leading_bit = (1u << (32 - __clz(seq_id)));
-        uint32_t bitrev_seq_id = ~((seq_id * 2) ^ -leading_bit);
+        uint32_t bitrev_seq_id = __brev(-__brev(seq_id * 2));
         uint3 twiddle_factor = mul_mod(
             roots_table_lv1[bitrev_seq_id >> 16],
             roots_table_lv2[bitrev_seq_id & 0xffff]
@@ -287,9 +286,9 @@ __global__ void fft_level_backward_radix4(uint3 * parts, int k, int i, uint3 * r
         // seq+1 | X | step    i + 1
         // seq | X X | step
 
-        uint32_t bitrev_seq_id = ~((seq_id * 2) ^ -(1u << (32 - __clz(seq_id))));
-        uint32_t bitrev_seq_id1 = ~((seq_id * 4) ^ -(1u << (32 - __clz(seq_id * 2))));
-        uint32_t bitrev_seq_id2 = ~((seq_id * 4 + 2) ^ -(1u << (32 - __clz(seq_id * 2 + 1))));
+        uint32_t bitrev_seq_id = __brev(-__brev(seq_id * 2));
+        uint32_t bitrev_seq_id1 = __brev(-__brev(seq_id * 4));
+        uint32_t bitrev_seq_id2 = __brev(-__brev(seq_id * 4 + 2));
 
         uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id >> 16], roots_table_lv2[bitrev_seq_id & 0xffff]);
         uint3 w1 = mul_mod(roots_table_lv1[bitrev_seq_id1 >> 16], roots_table_lv2[bitrev_seq_id1 & 0xffff]);
