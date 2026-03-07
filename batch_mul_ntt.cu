@@ -198,25 +198,25 @@ __global__ void fft_level_backward(uint3 * parts, int k, int i, uint3 * roots_ta
     }
 }
 
-__global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k, uint32_t L){
-    size_t L2 = ((size_t)L) * 2;
+__global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k, size_t L){
     __shared__ ushort2 carryInfo[32];
     parts += ((size_t)blockIdx.x) << k;
-    ret += ((size_t)blockIdx.x) * L * 2;
+    ret += ((size_t)blockIdx.x) * L;
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
         ushort block_carry = 0;
-        for (uint32_t i0 = 0; i0 < L; i0 += blockDim.x * blockDim.y){
-            uint32_t i = i0 + threadIdx.y * 32 + threadIdx.x;
+        for (size_t i0 = 0; i0 < L; i0 += blockDim.x * blockDim.y * 2){
+            uint32_t i = i0 + (threadIdx.y * 32 + threadIdx.x) * 2;
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
             uint32_t t0_value, t1_value;
-            r0_value = parts[((size_t)i) * 2].x;
-            r1_value = parts[((size_t)i) * 2 + 1].x;
-            c0_value = (i == 0) ? 0 : parts[((size_t)i) * 2 - 1].y;
-            c1_value = parts[((size_t)i) * 2].y;
-            t0_value = (i == 0) ? 0 : parts[((size_t)i) * 2 - 2].z;
-            t1_value = (i == 0) ? 0 : parts[((size_t)i) * 2 - 1].z;
+            r0_value = parts[i].x;
+            r1_value = parts[i + 1].x;
+            c0_value = (i == 0) ? 0 : parts[i - 1].y;
+            c1_value = parts[i].y;
+            t0_value = (i <= 1) ? 0 : parts[i - 2].z;
+            t1_value = (i == 0) ? 0 : parts[i - 1].z;
             ushort2 carry;
+
             r0_value = add_cc(r0_value, c0_value);
             r1_value = addc_cc(r1_value, c1_value);
             carry.x = addc(0, 0);
@@ -246,6 +246,7 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
                 carryInfo[threadIdx.y] = carry;
             }
             __syncthreads();
+
             if (threadIdx.y == 0){
                 ushort2 bc = carryInfo[threadIdx.x];
                 for (int delta = 1; delta < blockDim.y; delta *= 2){
@@ -266,6 +267,7 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
                 carryInfo[threadIdx.x] = bc;
             }
             __syncthreads();
+
             ushort compound = carry.y + ((threadIdx.y > 0) ? carryInfo[threadIdx.y - 1].x : block_carry);
             carry.x += compound >> 2;
             carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
@@ -278,30 +280,43 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
             }
             r0_value = add_cc(r0_value, (uint32_t)carry.x);
             r1_value = addc_cc(r1_value, 0);
+
             if (i < L){
-                ret[((size_t)i) * 2 + 0] = r0_value;
-                ret[((size_t)i) * 2 + 1] = r1_value;
+                ret[i] = r0_value;
+            }
+            if (i + 1 < L){
+                ret[i + 1] = r1_value;
             }
             block_carry = carryInfo[31].x;
             __syncthreads();
         }
         parts += ((size_t)gridDim.x) << k;
-        ret += L2 * gridDim.x;
+        ret += ((size_t)L) * gridDim.x;
     }
 }
 
-void batch_mul_ntt(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * workspace, NTTPrecomputedTables tables, uint32_t N, uint32_t L){
+void batch_mul_ntt(
+    uint32_t * A,
+    uint32_t * B,
+    uint32_t * ret,
+    uint32_t * workspace,
+    NTTPrecomputedTables tables,
+    uint32_t N,
+    uint32_t L_a,
+    uint32_t L_b
+){
+    size_t L = ((size_t)L_a) + L_b;
     size_t K = 1;
     int k = 0;
-    while (K < ((size_t)L) * 2){
+    while (K < L){
         K = K * 2;
         k++;
     }
     uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
     uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
 
-    copy_to_parts<<<170, 128>>>(parts_a, A, N, k, L);
-    copy_to_parts<<<170, 128>>>(parts_b, B, N, k, L);
+    copy_to_parts<<<170, 128>>>(parts_a, A, N, k, L_a);
+    copy_to_parts<<<170, 128>>>(parts_b, B, N, k, L_b);
 
     for (int i = 0; i < k; i ++){
         const int threads_per_block = 128;
@@ -338,16 +353,15 @@ void batch_mul_ntt(uint32_t * A, uint32_t * B, uint32_t * ret, uint32_t * worksp
     printf("\n");
     delete []parts_a_host;*/
 
-    if (true){
-        int threads_per_block = min(L, 1024);
-        int num_blocks = min(N, 65536);
-        add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
-    }
+    int threads_per_block = min(L, (size_t)1024);
+    int num_blocks = min(N, 65536);
+    add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
 }
 
-size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L){
+size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L_a, uint32_t L_b){
+    size_t L = (size_t)L_a + (size_t)L_b;
     size_t K = 1;
-    while (K < ((size_t)L) * 2){
+    while (K < L){
         K <<= 1;
     }
     // parts_a + parts_b, each is N*K uint3 values
