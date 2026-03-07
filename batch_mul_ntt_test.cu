@@ -201,6 +201,9 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
             return;
         }
     }
+    printf("  params size %dM, workspace size %dM\n",
+        int((size_A + size_B + size_ret) / 1000000),
+        int(workspace_size / 1000000));
 
     // Warmup
     batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);

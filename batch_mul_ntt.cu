@@ -295,13 +295,22 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
     }
 }
 
+static uint32_t get_N_max(uint32_t N, uint32_t L_a, uint32_t L_b){
+    size_t L = (size_t)L_a + (size_t)L_b;
+    uint32_t cache_limit = max(4000000 / L, (size_t) 16);
+    if (N >= cache_limit){
+        N = cache_limit;
+    }
+    return max(1, min(N, 65536));
+}
+
 void batch_mul_ntt(
     uint32_t * A,
     uint32_t * B,
     uint32_t * ret,
     uint32_t * workspace,
     NTTPrecomputedTables tables,
-    uint32_t N,
+    uint32_t N_total,
     uint32_t L_a,
     uint32_t L_b
 ){
@@ -312,50 +321,47 @@ void batch_mul_ntt(
         K = K * 2;
         k++;
     }
-    uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
-    uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
 
-    copy_to_parts<<<170, 128>>>(parts_a, A, N, k, L_a);
-    copy_to_parts<<<170, 128>>>(parts_b, B, N, k, L_b);
+    uint32_t N_batch = get_N_max(N_total, L_a, L_b);
 
-    for (int i = 0; i < k; i ++){
-        const int threads_per_block = 128;
-        int num_blocks = min(((((size_t)N) << (k + 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-        fft_level_forward<<<num_blocks, threads_per_block>>>(
-            parts_a, // parts_b must be adjacent to it
-            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-            N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
-        );
-    }
+    for (uint32_t ni = 0; ni < N_total; ni += N_batch){
+        uint32_t N = min(N_total - ni, N_batch);
+        uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
+        uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
 
-    // fuse divide by K into pointwise mul
-    pointwise_mul<<<170, 128>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
-    
-    for (int i = k - 1; i >= 0; i --){
-        const int threads_per_block = 128;
-        int num_blocks = min(((((size_t)N) << (k + 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-        fft_level_backward<<<num_blocks, threads_per_block>>>(
-            parts_a,
-            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-            N
-        );
-    }
-    
-    /*uint32_t * parts_a_host = new uint32_t[K * 3];
-    cudaMemcpy(parts_a_host, parts_a, K * 3 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-    printf("parts_a");
-    for (int i = 0; i < K * 3; i ++){
-        printf(" %08x", parts_a_host[i]);
-        if (i % 3 == 2){
-            printf(",");
+        copy_to_parts<<<170, 128>>>(parts_a, A, N, k, L_a);
+        copy_to_parts<<<170, 128>>>(parts_b, B, N, k, L_b);
+
+        for (int i = 0; i < k; i ++){
+            const int threads_per_block = 128;
+            int num_blocks = min(((((size_t)N) << (k + 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+            fft_level_forward<<<num_blocks, threads_per_block>>>(
+                parts_a, // parts_b must be adjacent to it
+                k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
+            );
         }
-    }
-    printf("\n");
-    delete []parts_a_host;*/
 
-    int threads_per_block = min(L, (size_t)1024);
-    int num_blocks = min(N, 65536);
-    add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
+        // fuse divide by K into pointwise mul
+        pointwise_mul<<<170, 128>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
+        
+        for (int i = k - 1; i >= 0; i --){
+            const int threads_per_block = 128;
+            int num_blocks = min(((((size_t)N) << (k + 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+            fft_level_backward<<<num_blocks, threads_per_block>>>(
+                parts_a,
+                k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                N
+            );
+        }
+
+        int threads_per_block = min(L, (size_t)1024);
+        int num_blocks = min(N, 65536);
+        add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
+        A += ((size_t)N) * L_a;
+        B += ((size_t)N) * L_b;
+        ret += N * L;
+    }
 }
 
 size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L_a, uint32_t L_b){
@@ -365,5 +371,6 @@ size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L_a, uint32_t L_b){
         K <<= 1;
     }
     // parts_a + parts_b, each is N*K uint3 values
-    return N * K * 2 * sizeof(uint3);
+    uint32_t N_batch = get_N_max(N, L_a, L_b);
+    return N_batch * K * 2 * sizeof(uint3);
 }
