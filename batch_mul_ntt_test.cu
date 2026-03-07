@@ -299,3 +299,46 @@ done:
     printf("All correctness tests: %s\n", all_passed ? "PASSED" : "FAILED");
     return all_passed ? 0 : 1;
 }
+
+/*
+Benchmarking L_a=512, L_b=512, N=195312 (N*L_a=99999744)...
+  params size 1599M, workspace size 95M
+  Average time: 39.796 ms
+  Multiplications per second: 4907.78 thousand
+  Approx. bandwidth (A+B+ret): 40.20 GB/s
+Benchmarking L_a=1024, L_b=1024, N=97656 (N*L_a=99999744)...
+  params size 1599M, workspace size 95M
+  Average time: 37.998 ms
+  Multiplications per second: 2570.04 thousand
+  Approx. bandwidth (A+B+ret): 42.11 GB/s
+Benchmarking L_a=16384, L_b=16384, N=6103 (N*L_a=99991552)...
+  params size 1599M, workspace size 95M
+  Average time: 47.480 ms
+  Multiplications per second: 128.54 thousand
+  Approx. bandwidth (A+B+ret): 33.70 GB/s
+Benchmarking L_a=262144, L_b=262144, N=381 (N*L_a=99876864)...
+  params size 1598M, workspace size 201M
+  Average time: 101.078 ms
+  Multiplications per second: 3.77 thousand
+  Approx. bandwidth (A+B+ret): 15.81 GB/s
+Benchmarking L_a=4194304, L_b=4194304, N=23 (N*L_a=96468992)...
+  params size 1543M, workspace size 3221M
+  Average time: 129.176 ms
+  Multiplications per second: 0.18 thousand
+  Approx. bandwidth (A+B+ret): 11.95 GB/s
+Benchmarking L_a=8388608, L_b=8388608, N=11 (N*L_a=92274688)...
+  params size 1476M, workspace size 4429M
+  Average time: 128.957 ms
+  Multiplications per second: 0.09 thousand
+  Approx. bandwidth (A+B+ret): 11.45 GB/s
+Benchmarking L_a=16777216, L_b=16777216, N=5 (N*L_a=83886080)...
+  params size 1342M, workspace size 4026M
+  Average time: 131.861 ms
+  Multiplications per second: 0.04 thousand
+  Approx. bandwidth (A+B+ret): 10.18 GB/s
+Benchmarking L_a=33554432, L_b=33554432, N=2 (N*L_a=67108864)...
+  params size 1073M, workspace size 3221M
+  Average time: 134.039 ms
+  Multiplications per second: 0.01 thousand
+  Approx. bandwidth (A+B+ret): 8.01 GB/s
+*/

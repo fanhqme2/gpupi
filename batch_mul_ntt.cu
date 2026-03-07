@@ -114,6 +114,10 @@ __device__ __forceinline__ uint3 mul_mod(uint3 a, uint3 b){
     return make_uint3(out0, out1, out2);
 }
 
+__device__ uint32_t bitrev16(uint32_t idx){
+    return __brev(idx) >> 16;
+}
+
 __global__ void fill_in_power_table(uint3 * table, int n, uint3 root){
     if (threadIdx.x == 0){
         table[0] = make_uint3(1, 0, 0);
@@ -128,9 +132,23 @@ __global__ void fill_in_power_table(uint3 * table, int n, uint3 root){
     }
 }
 
+__global__ void fill_in_power_table_bitrev16(uint3 * table, int n, uint3 root){
+    if (threadIdx.x == 0){
+        table[0] = make_uint3(1, 0, 0);
+    }
+    __syncthreads();
+    for (int l = 1; l < n; l += l){
+        for (int i = l + threadIdx.x; i < l + l; i += blockDim.x){
+            table[bitrev16(i)] = mul_mod(table[bitrev16(i - l)], root);
+        }
+        root = mul_mod(root, root);
+        __syncthreads();
+    }
+}
+
 void init_ntt_precomputed_tables(NTTPrecomputedTables * tables){
-    fill_in_power_table<<<1, 1024>>>(tables->roots_table_lv1, 65536, make_uint3(arr_root0, arr_root1, arr_root2));
-    fill_in_power_table<<<1, 1024>>>(tables->roots_table_lv2, 65536, make_uint3(arr_root65536_0, arr_root65536_1, arr_root65536_2));
+    fill_in_power_table_bitrev16<<<1, 1024>>>(tables->roots_table_lv1, 65536, make_uint3(arr_root0, arr_root1, arr_root2));
+    fill_in_power_table_bitrev16<<<1, 1024>>>(tables->roots_table_lv2, 65536, make_uint3(arr_root65536_0, arr_root65536_1, arr_root65536_2));
     fill_in_power_table<<<1, 32>>>(tables->inv2n_table, 33, make_uint3(arr_inv2_0, arr_inv2_1, arr_inv2_2));
 }
 
@@ -154,10 +172,11 @@ __global__ void fft_level_forward(uint3 * parts, int k, int i, uint3 * roots_tab
         size_t offset = (j >> (k - 1 - i)) << (k - i);
         uint32_t seq_id = (j >> (k - 1 - i)) & (seq_len - 1);
         uint32_t step_id = j & (step - 1);
-        uint32_t bitrev_seq_id = __brev((uint32_t)seq_id * 2);
+        //uint32_t bitrev_seq_id = __brev((uint32_t)seq_id * 2);
+        uint32_t bitrev_seq_id = (uint32_t)seq_id * 2;
         uint3 twiddle_factor = mul_mod(
-            roots_table_lv2[bitrev_seq_id >> 16],
-            roots_table_lv1[bitrev_seq_id & 0xffff]
+            roots_table_lv1[bitrev_seq_id >> 16],
+            roots_table_lv2[bitrev_seq_id & 0xffff]
         );
         uint3 u = parts[offset +        step_id];
         uint3 v = parts[offset + step + step_id];
@@ -188,13 +207,13 @@ __global__ void fft_level_forward_radix4(
         // seq+1 | X | step    i + 1
         // seq | X X | step
 
-        uint32_t bitrev_seq_id = __brev((uint32_t)seq_id * 2);
-        uint32_t bitrev_seq_id1 = __brev((uint32_t)(seq_id * 2 + 0) * 2);
-        uint32_t bitrev_seq_id2 = __brev((uint32_t)(seq_id * 2 + 1) * 2);
+        uint32_t bitrev_seq_id = (uint32_t)seq_id * 2;
+        uint32_t bitrev_seq_id1 = (uint32_t)(seq_id * 2 + 0) * 2;
+        uint32_t bitrev_seq_id2 = (uint32_t)(seq_id * 2 + 1) * 2;
 
-        uint3 w0 = mul_mod(roots_table_lv2[bitrev_seq_id >> 16], roots_table_lv1[bitrev_seq_id & 0xffff]);
-        uint3 w1 = mul_mod(roots_table_lv2[bitrev_seq_id1 >> 16], roots_table_lv1[bitrev_seq_id1 & 0xffff]);
-        uint3 w2 = mul_mod(roots_table_lv2[bitrev_seq_id2 >> 16], roots_table_lv1[bitrev_seq_id2 & 0xffff]);
+        uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id >> 16], roots_table_lv2[bitrev_seq_id & 0xffff]);
+        uint3 w1 = mul_mod(roots_table_lv1[bitrev_seq_id1 >> 16], roots_table_lv2[bitrev_seq_id1 & 0xffff]);
+        uint3 w2 = mul_mod(roots_table_lv1[bitrev_seq_id2 >> 16], roots_table_lv2[bitrev_seq_id2 & 0xffff]);
 
         size_t base = offset + step_id;
 
@@ -238,10 +257,11 @@ __global__ void fft_level_backward(uint3 * parts, int k, int i, uint3 * roots_ta
         size_t offset = (j >> (k - 1 - i)) << (k - i);
         uint32_t seq_id = (j >> (k - 1 - i)) & (seq_len - 1);
         uint32_t step_id = j & (step - 1);
-        uint32_t bitrev_seq_id = -__brev((uint32_t)seq_id * 2);
+        uint32_t leading_bit = (1u << (32 - __clz(seq_id)));
+        uint32_t bitrev_seq_id = ~((seq_id * 2) ^ -leading_bit);
         uint3 twiddle_factor = mul_mod(
-            roots_table_lv2[bitrev_seq_id >> 16],
-            roots_table_lv1[bitrev_seq_id & 0xffff]
+            roots_table_lv1[bitrev_seq_id >> 16],
+            roots_table_lv2[bitrev_seq_id & 0xffff]
         );
         uint3 u = parts[offset +        step_id];
         uint3 v = parts[offset + step + step_id];
@@ -267,13 +287,14 @@ __global__ void fft_level_backward_radix4(uint3 * parts, int k, int i, uint3 * r
         // seq+1 | X | step    i + 1
         // seq | X X | step
 
-        uint32_t bitrev_seq_id = -__brev((uint32_t)seq_id * 2);
-        uint32_t bitrev_seq_id1 = -__brev((uint32_t)(seq_id * 2 + 0) * 2);
-        uint32_t bitrev_seq_id2 = -__brev((uint32_t)(seq_id * 2 + 1) * 2);
+        uint32_t bitrev_seq_id = ~((seq_id * 2) ^ -(1u << (32 - __clz(seq_id))));
+        uint32_t bitrev_seq_id1 = ~((seq_id * 4) ^ -(1u << (32 - __clz(seq_id * 2))));
+        uint32_t bitrev_seq_id2 = ~((seq_id * 4 + 2) ^ -(1u << (32 - __clz(seq_id * 2 + 1))));
 
-        uint3 w0 = mul_mod(roots_table_lv2[bitrev_seq_id >> 16], roots_table_lv1[bitrev_seq_id & 0xffff]);
-        uint3 w1 = mul_mod(roots_table_lv2[bitrev_seq_id1 >> 16], roots_table_lv1[bitrev_seq_id1 & 0xffff]);
-        uint3 w2 = mul_mod(roots_table_lv2[bitrev_seq_id2 >> 16], roots_table_lv1[bitrev_seq_id2 & 0xffff]);
+        uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id >> 16], roots_table_lv2[bitrev_seq_id & 0xffff]);
+        uint3 w1 = mul_mod(roots_table_lv1[bitrev_seq_id1 >> 16], roots_table_lv2[bitrev_seq_id1 & 0xffff]);
+        uint3 w2 = mul_mod(roots_table_lv1[bitrev_seq_id2 >> 16], roots_table_lv2[bitrev_seq_id2 & 0xffff]);
+
 
         size_t base = offset + step_id;
 
