@@ -1116,8 +1116,9 @@ void batch_mul_ntt(
 
         for (int i = 0; i < k; i ++){
             if (k - i <= 10){
+                int local_size = 1 << (k - i);
                 int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
-                fft_level_forward_final<<<num_blocks, 256>>>(
+                fft_level_forward_final<<<num_blocks, min(local_size >> 1, 256)>>>(
                     parts_a,
                     k, i, tables.roots_table_lv1, tables.roots_table_lv2,
                     N * 2 // we use 2 * N to do parts_a and parts_b
@@ -1176,7 +1177,8 @@ void batch_mul_ntt(
             if (i == k - 1){
                 int i0 = max(0, i - 9);
                 int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
-                fft_level_backward_final<<<num_blocks, 256>>>(
+                int local_size = 1 << (k - i0);
+                fft_level_backward_final<<<num_blocks, min(local_size >> 1, 256)>>>(
                     parts_a,
                     k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
                     N
