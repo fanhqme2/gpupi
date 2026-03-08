@@ -996,7 +996,7 @@ __global__ void add3_apply_blocks(uint3 * parts, uint32_t * ret, ushort2 * ret_c
 
 static uint32_t get_N_max(uint32_t N, uint32_t L_a, uint32_t L_b){
     size_t L = (size_t)L_a + (size_t)L_b;
-    uint32_t cache_limit = max(4000000 / L, (size_t) 16);
+    uint32_t cache_limit = max(4000000 / L, (size_t) 1);
     if (N >= cache_limit){
         N = cache_limit;
     }

@@ -320,42 +320,42 @@ done:
 /*
 Benchmarking L_a=512, L_b=512, N=195312 (N*L_a=99999744)...
   params size 1599M, workspace size 95M
-  Average time: 33.442 ms
-  Multiplications per second: 5840.28 thousand
-  Approx. bandwidth (A+B+ret): 47.84 GB/s
+  Average time: 33.334 ms
+  Multiplications per second: 5859.28 thousand
+  Approx. bandwidth (A+B+ret): 48.00 GB/s
 Benchmarking L_a=1024, L_b=1024, N=97656 (N*L_a=99999744)...
   params size 1599M, workspace size 95M
-  Average time: 34.972 ms
-  Multiplications per second: 2792.37 thousand
-  Approx. bandwidth (A+B+ret): 45.75 GB/s
+  Average time: 35.536 ms
+  Multiplications per second: 2748.06 thousand
+  Approx. bandwidth (A+B+ret): 45.02 GB/s
 Benchmarking L_a=16384, L_b=16384, N=6103 (N*L_a=99991552)...
   params size 1599M, workspace size 95M
-  Average time: 41.987 ms
-  Multiplications per second: 145.36 thousand
-  Approx. bandwidth (A+B+ret): 38.10 GB/s
+  Average time: 44.262 ms
+  Multiplications per second: 137.88 thousand
+  Approx. bandwidth (A+B+ret): 36.15 GB/s
 Benchmarking L_a=262144, L_b=262144, N=381 (N*L_a=99876864)...
-  params size 1598M, workspace size 201M
-  Average time: 69.983 ms
-  Multiplications per second: 5.44 thousand
-  Approx. bandwidth (A+B+ret): 22.83 GB/s
+  params size 1598M, workspace size 88M
+  Average time: 46.104 ms
+  Multiplications per second: 8.26 thousand
+  Approx. bandwidth (A+B+ret): 34.66 GB/s
 Benchmarking L_a=4194304, L_b=4194304, N=23 (N*L_a=96468992)...
-  params size 1543M, workspace size 3221M
-  Average time: 86.243 ms
-  Multiplications per second: 0.27 thousand
-  Approx. bandwidth (A+B+ret): 17.90 GB/s
+  params size 1543M, workspace size 201M
+  Average time: 68.013 ms
+  Multiplications per second: 0.34 thousand
+  Approx. bandwidth (A+B+ret): 22.69 GB/s
 Benchmarking L_a=8388608, L_b=8388608, N=11 (N*L_a=92274688)...
-  params size 1476M, workspace size 4429M
-  Average time: 85.185 ms
-  Multiplications per second: 0.13 thousand
-  Approx. bandwidth (A+B+ret): 17.33 GB/s
+  params size 1476M, workspace size 402M
+  Average time: 77.012 ms
+  Multiplications per second: 0.14 thousand
+  Approx. bandwidth (A+B+ret): 19.17 GB/s
 Benchmarking L_a=16777216, L_b=16777216, N=5 (N*L_a=83886080)...
-  params size 1342M, workspace size 4026M
-  Average time: 87.723 ms
-  Multiplications per second: 0.06 thousand
-  Approx. bandwidth (A+B+ret): 15.30 GB/s
+  params size 1342M, workspace size 805M
+  Average time: 70.122 ms
+  Multiplications per second: 0.07 thousand
+  Approx. bandwidth (A+B+ret): 19.14 GB/s
 Benchmarking L_a=33554432, L_b=33554432, N=2 (N*L_a=67108864)...
-  params size 1073M, workspace size 3221M
-  Average time: 96.985 ms
-  Multiplications per second: 0.02 thousand
-  Approx. bandwidth (A+B+ret): 11.07 GB/s
+  params size 1073M, workspace size 1610M
+  Average time: 59.018 ms
+  Multiplications per second: 0.03 thousand
+  Approx. bandwidth (A+B+ret): 18.19 GB/s
 */
