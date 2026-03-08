@@ -276,6 +276,23 @@ int main() {
     printf("\n");
     if (!all_passed) goto done;
 
+    printf("Large L tests (N=1,2,3 with N*(L_a+L_b) ~ 1e7):\n");
+    {
+        constexpr uint32_t target_total = 10000000u;
+        const uint32_t large_l_ns[] = {1u, 2u, 3u};
+        for (uint32_t N_case : large_l_ns) {
+            uint32_t L = target_total / N_case;
+            uint32_t L_a = L / 2;
+            uint32_t L_b = L - L_a;
+            if (!test_configuration(N_case, L_a, L_b, tables, rng, true)) {
+                all_passed = false;
+                break;
+            }
+        }
+    }
+    printf("\n");
+    if (!all_passed) goto done;
+
     printf("=== Benchmark Tests ===\n\n");
     for (uint32_t e = 9; e <= 25; ++e) {
         
