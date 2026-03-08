@@ -428,29 +428,35 @@ __global__ void fft_level_forward_final(
     uint3 * roots_table_lv1, uint3 * roots_table_lv2,
     size_t N
 ){
+    uint32_t local_size = 1u << (k - i);
     uint32_t seq_len = 1u << i;
     __shared__ uint3 local_coefs[1024];
     for (size_t j = ((size_t)blockIdx.x) << (k - i); j < (N << k); j += gridDim.x << (k - i)){
         uint32_t seq_id = (j >> (k - i)) & (seq_len - 1);
-        local_coefs[threadIdx.x] = parts[j + threadIdx.x];
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs[t] = parts[j + t];
+        }
         __syncthreads();
         for (int lv = k - i - 1; lv >= 0; lv--){
             uint32_t stride = 1u << lv;
-            if ((threadIdx.x & stride) == 0){
-                uint32_t bitrev_seq_id = ((seq_id << (k - i - 1 - lv)) | (threadIdx.x >> (lv + 1))) * 2;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = ((seq_id << (k - i - 1 - lv)) | (idx >> (lv + 1))) * 2;
                 uint3 twiddle_factor = mul_mod(
                     roots_table_lv1[bitrev_seq_id >> 16],
                     roots_table_lv2[bitrev_seq_id & 0xffff]
                 );
-                uint3 u = local_coefs[threadIdx.x];
-                uint3 v = local_coefs[threadIdx.x + stride];
+                uint3 u = local_coefs[idx];
+                uint3 v = local_coefs[idx + stride];
                 uint3 w = mul_mod(v, twiddle_factor);
-                local_coefs[threadIdx.x] = add_mod(u, w);
-                local_coefs[threadIdx.x + stride] = sub_mod(u, w);
+                local_coefs[idx] = add_mod(u, w);
+                local_coefs[idx + stride] = sub_mod(u, w);
             }
             __syncthreads();
         }
-        parts[j + threadIdx.x] = local_coefs[threadIdx.x];
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            parts[j + t] = local_coefs[t];
+        }
         __syncthreads();
     }
 }
@@ -693,29 +699,35 @@ __global__ void fft_level_backward_final(
     uint3 * roots_table_lv1, uint3 * roots_table_lv2,
     size_t N
 ){
+    uint32_t local_size = 1u << (k - i);
     uint32_t seq_len = 1u << i;
     __shared__ uint3 local_coefs[1024];
     for (size_t j = ((size_t)blockIdx.x) << (k - i); j < (N << k); j += gridDim.x << (k - i)){
         uint32_t seq_id = (j >> (k - i)) & (seq_len - 1);
-        local_coefs[threadIdx.x] = parts[j + threadIdx.x];
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs[t] = parts[j + t];
+        }
         __syncthreads();
         for (int lv = 0; lv < k - i; lv ++){
             uint32_t stride = 1u << lv;
-            if ((threadIdx.x & stride) == 0){
-                uint32_t bitrev_seq_id = ((seq_id << (k - i - 1 - lv)) | (threadIdx.x >> (lv + 1))) * 2;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = ((seq_id << (k - i - 1 - lv)) | (idx >> (lv + 1))) * 2;
                 bitrev_seq_id = __brev(-__brev(bitrev_seq_id));
                 uint3 twiddle_factor = mul_mod(
                     roots_table_lv1[bitrev_seq_id >> 16],
                     roots_table_lv2[bitrev_seq_id & 0xffff]
                 );
-                uint3 u = local_coefs[threadIdx.x];
-                uint3 v = local_coefs[threadIdx.x + stride];
-                local_coefs[threadIdx.x] = add_mod(u, v);
-                local_coefs[threadIdx.x + stride] = mul_mod(sub_mod(u, v), twiddle_factor);
+                uint3 u = local_coefs[idx];
+                uint3 v = local_coefs[idx + stride];
+                local_coefs[idx] = add_mod(u, v);
+                local_coefs[idx + stride] = mul_mod(sub_mod(u, v), twiddle_factor);
             }
             __syncthreads();
         }
-        parts[j + threadIdx.x] = local_coefs[threadIdx.x];
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            parts[j + t] = local_coefs[t];
+        }
         __syncthreads();
     }
 }
@@ -1104,9 +1116,8 @@ void batch_mul_ntt(
 
         for (int i = 0; i < k; i ++){
             if (k - i <= 10){
-                int local_size = 1 << (k - i);
                 int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
-                fft_level_forward_final<<<num_blocks, local_size>>>(
+                fft_level_forward_final<<<num_blocks, 256>>>(
                     parts_a,
                     k, i, tables.roots_table_lv1, tables.roots_table_lv2,
                     N * 2 // we use 2 * N to do parts_a and parts_b
@@ -1164,9 +1175,8 @@ void batch_mul_ntt(
         for (int i = k - 1; i >= 0; i --){
             if (i == k - 1){
                 int i0 = max(0, i - 9);
-                int local_size = 1 << (k - i0);
                 int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
-                fft_level_backward_final<<<num_blocks, local_size>>>(
+                fft_level_backward_final<<<num_blocks, 256>>>(
                     parts_a,
                     k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
                     N
