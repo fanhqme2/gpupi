@@ -153,19 +153,6 @@ void init_ntt_precomputed_tables(NTTPrecomputedTables * tables){
     fill_in_power_table<<<1, 32>>>(tables->inv2n_table, 33, make_uint3(arr_inv2_0, arr_inv2_1, arr_inv2_2));
 }
 
-__global__ void copy_to_parts(uint3 * parts, uint32_t * src, size_t N, int k, uint32_t L){
-    size_t K = ((size_t)1) << k;
-    for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < (N << k); i += blockDim.x * gridDim.x){
-        uint32_t val = 0;
-        size_t bid = i >> k;
-        size_t idx = i & (K - 1);
-        if (idx < L){
-            val = src[bid * L + idx];
-        }
-        parts[i] = make_uint3(val, 0, 0);
-    }
-}
-
 __global__ void fft_level_forward(uint3 * parts, int k, int i, uint3 * roots_table_lv1, uint3 * roots_table_lv2, size_t N){
     uint32_t step = 1 << (k - 1 - i);
     uint32_t seq_len = 1 << i;
@@ -186,148 +173,6 @@ __global__ void fft_level_forward(uint3 * parts, int k, int i, uint3 * roots_tab
         u = add_mod(u, w);
         parts[offset +        step_id] = u;
         parts[offset + step + step_id] = v;
-    }
-}
-
-__global__ void fft_level_forward_radix4(
-    uint3 *parts, int k, int i,
-    uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N
-){
-    const uint32_t step = 1u << (k - 2 - i);
-    const uint32_t seq_len = 1u << i;
-
-    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 2)); j += blockDim.x * gridDim.x){
-
-        size_t group = j >> (k - 2 - i);
-        size_t offset = group << (k - i);
-        uint32_t seq_id = (uint32_t)(group & (seq_len - 1));
-        uint32_t step_id = (uint32_t)(j & (step - 1));
-
-        // seq | X | step+1    i
-        // seq+1 | X | step    i + 1
-        // seq | X X | step
-
-        uint32_t bitrev_seq_id = (uint32_t)seq_id * 2;
-        uint32_t bitrev_seq_id1 = (uint32_t)(seq_id * 2 + 0) * 2;
-        uint32_t bitrev_seq_id2 = (uint32_t)(seq_id * 2 + 1) * 2;
-
-        uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id >> 16], roots_table_lv2[bitrev_seq_id & 0xffff]);
-        uint3 w1 = mul_mod(roots_table_lv1[bitrev_seq_id1 >> 16], roots_table_lv2[bitrev_seq_id1 & 0xffff]);
-        uint3 w2 = mul_mod(roots_table_lv1[bitrev_seq_id2 >> 16], roots_table_lv2[bitrev_seq_id2 & 0xffff]);
-
-        size_t base = offset + step_id;
-
-        uint3 x0 = parts[base];
-        uint3 x1 = parts[base + step];
-        uint3 x2 = parts[base + step * 2];
-        uint3 x3 = parts[base + step * 3];
-
-        // stage i
-        uint3 wx2 = mul_mod(x2, w0);
-        uint3 wx3 = mul_mod(x3, w0);
-
-        uint3 a0 = add_mod(x0, wx2);
-        uint3 a2 = sub_mod(x0, wx2);
-        uint3 a1 = add_mod(x1, wx3);
-        uint3 a3 = sub_mod(x1, wx3);
-
-        // stage i+1
-        uint3 wa1 = mul_mod(a1, w1);
-        uint3 wa3 = mul_mod(a3, w2);
-
-        parts[base]              = add_mod(a0, wa1);
-        parts[base + step]       = sub_mod(a0, wa1);
-        parts[base + step * 2]   = add_mod(a2, wa3);
-        parts[base + step * 3]   = sub_mod(a2, wa3);
-    }
-}
-
-__global__ void fft_level_forward_radix8(
-    uint3 *parts, int k, int i,
-    uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N
-){
-    const uint32_t step = 1u << (k - 3 - i);
-    const uint32_t seq_len = 1u << i;
-
-    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 3)); j += blockDim.x * gridDim.x){
-        size_t group = j >> (k - 3 - i);
-        size_t offset = group << (k - i);
-        uint32_t seq_id = (uint32_t)(group & (seq_len - 1));
-        uint32_t step_id = (uint32_t)(j & (step - 1));
-
-        uint32_t bitrev_seq_id0 = (uint32_t)seq_id * 2;
-        uint32_t bitrev_seq_id10 = (uint32_t)(seq_id * 2 + 0) * 2;
-        uint32_t bitrev_seq_id11 = (uint32_t)(seq_id * 2 + 1) * 2;
-        uint32_t bitrev_seq_id20 = (uint32_t)(seq_id * 4 + 0) * 2;
-        uint32_t bitrev_seq_id21 = (uint32_t)(seq_id * 4 + 1) * 2;
-        uint32_t bitrev_seq_id22 = (uint32_t)(seq_id * 4 + 2) * 2;
-        uint32_t bitrev_seq_id23 = (uint32_t)(seq_id * 4 + 3) * 2;
-
-        uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id0 >> 16], roots_table_lv2[bitrev_seq_id0 & 0xffff]);
-        uint3 w10 = mul_mod(roots_table_lv1[bitrev_seq_id10 >> 16], roots_table_lv2[bitrev_seq_id10 & 0xffff]);
-        uint3 w11 = mul_mod(roots_table_lv1[bitrev_seq_id11 >> 16], roots_table_lv2[bitrev_seq_id11 & 0xffff]);
-        uint3 w20 = mul_mod(roots_table_lv1[bitrev_seq_id20 >> 16], roots_table_lv2[bitrev_seq_id20 & 0xffff]);
-        uint3 w21 = mul_mod(roots_table_lv1[bitrev_seq_id21 >> 16], roots_table_lv2[bitrev_seq_id21 & 0xffff]);
-        uint3 w22 = mul_mod(roots_table_lv1[bitrev_seq_id22 >> 16], roots_table_lv2[bitrev_seq_id22 & 0xffff]);
-        uint3 w23 = mul_mod(roots_table_lv1[bitrev_seq_id23 >> 16], roots_table_lv2[bitrev_seq_id23 & 0xffff]);
-
-        size_t base = offset + step_id;
-
-        uint3 x0 = parts[base];
-        uint3 x1 = parts[base + step];
-        uint3 x2 = parts[base + step * 2];
-        uint3 x3 = parts[base + step * 3];
-        uint3 x4 = parts[base + step * 4];
-        uint3 x5 = parts[base + step * 5];
-        uint3 x6 = parts[base + step * 6];
-        uint3 x7 = parts[base + step * 7];
-
-        // stage i
-        uint3 wx4 = mul_mod(x4, w0);
-        uint3 wx5 = mul_mod(x5, w0);
-        uint3 wx6 = mul_mod(x6, w0);
-        uint3 wx7 = mul_mod(x7, w0);
-
-        uint3 b0 = add_mod(x0, wx4);
-        uint3 b1 = add_mod(x1, wx5);
-        uint3 b2 = add_mod(x2, wx6);
-        uint3 b3 = add_mod(x3, wx7);
-        uint3 b4 = sub_mod(x0, wx4);
-        uint3 b5 = sub_mod(x1, wx5);
-        uint3 b6 = sub_mod(x2, wx6);
-        uint3 b7 = sub_mod(x3, wx7);
-
-        // stage i+1
-        uint3 wb2 = mul_mod(b2, w10);
-        uint3 wb3 = mul_mod(b3, w10);
-        uint3 wb6 = mul_mod(b6, w11);
-        uint3 wb7 = mul_mod(b7, w11);
-
-        uint3 c0 = add_mod(b0, wb2);
-        uint3 c1 = add_mod(b1, wb3);
-        uint3 c2 = sub_mod(b0, wb2);
-        uint3 c3 = sub_mod(b1, wb3);
-        uint3 c4 = add_mod(b4, wb6);
-        uint3 c5 = add_mod(b5, wb7);
-        uint3 c6 = sub_mod(b4, wb6);
-        uint3 c7 = sub_mod(b5, wb7);
-
-        // stage i+2
-        uint3 wc1 = mul_mod(c1, w20);
-        uint3 wc3 = mul_mod(c3, w21);
-        uint3 wc5 = mul_mod(c5, w22);
-        uint3 wc7 = mul_mod(c7, w23);
-
-        parts[base]            = add_mod(c0, wc1);
-        parts[base + step]     = sub_mod(c0, wc1);
-        parts[base + step * 2] = add_mod(c2, wc3);
-        parts[base + step * 3] = sub_mod(c2, wc3);
-        parts[base + step * 4] = add_mod(c4, wc5);
-        parts[base + step * 5] = sub_mod(c4, wc5);
-        parts[base + step * 6] = add_mod(c6, wc7);
-        parts[base + step * 7] = sub_mod(c6, wc7);
     }
 }
 
@@ -424,6 +269,101 @@ __global__ void fft_level_forward_radix16(
     }
 }
 
+__global__ void fft_level_forward_radix16_initial(
+    uint32_t * A, uint32_t * B, uint3 * parts, int k, int i,
+    uint3 *roots_table_lv1, uint3 *roots_table_lv2,
+    size_t N, uint32_t L_a, uint32_t L_b
+){
+    const uint32_t step = 1u << (k - 4 - i);
+    size_t N_half = N >> 1;
+
+    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 4)); j += blockDim.x * gridDim.x){
+        size_t group = j >> (k - 4 - i);
+        size_t offset = group << (k - i);
+        uint32_t step_id = (uint32_t)(j & (step - 1));
+
+        uint3 w0 = make_uint3(1, 0, 0);
+        uint3 w10 = w0;
+        uint3 w11 = roots_table_lv2[2];
+        uint3 w20 = w0;
+        uint3 w21 = w11;
+        uint3 w22 = roots_table_lv2[4];
+        uint3 w23 = roots_table_lv2[6];
+
+        uint3 w3[8];
+        w3[0] = w0;
+        w3[1] = w11;
+        w3[2] = w22;
+        w3[3] = w23;
+        w3[4] = roots_table_lv2[8];
+        w3[5] = roots_table_lv2[10];
+        w3[6] = roots_table_lv2[12];
+        w3[7] = roots_table_lv2[14];
+
+        size_t base = offset + step_id;
+
+        uint3 x[16];
+        #pragma unroll
+        for (int t = 0; t < 16; t++){
+            if (group < N_half){
+                size_t offset_input = group * L_a;
+                uint32_t idx = step_id + (size_t)step * t;
+                x[t] = make_uint3(idx < L_a ? A[offset_input + idx] : 0, 0, 0);
+            }else{
+                size_t offset_input = (group - N_half) * L_b;
+                uint32_t idx = step_id + (size_t)step * t;
+                x[t] = make_uint3(idx < L_b ? B[offset_input + idx] : 0, 0, 0);
+            }
+        }
+
+        // stage i
+        uint3 a[16];
+        #pragma unroll
+        for (int t = 0; t < 8; t++){
+            uint3 wx = mul_mod(x[t + 8], w0);
+            a[t] = add_mod(x[t], wx);
+            a[t + 8] = sub_mod(x[t], wx);
+        }
+
+        // stage i+1
+        uint3 b[16];
+        #pragma unroll
+        for (int g = 0; g < 2; g++){
+            uint3 w = (g == 0) ? w10 : w11;
+            #pragma unroll
+            for (int t = 0; t < 4; t++){
+                int idx = g * 8 + t;
+                uint3 wa = mul_mod(a[idx + 4], w);
+                b[idx] = add_mod(a[idx], wa);
+                b[idx + 4] = sub_mod(a[idx], wa);
+            }
+        }
+
+        // stage i+2
+        uint3 c[16];
+        #pragma unroll
+        for (int g = 0; g < 4; g++){
+            uint3 w = (g == 0) ? w20 : (g == 1 ? w21 : (g == 2 ? w22 : w23));
+            #pragma unroll
+            for (int t = 0; t < 2; t++){
+                int idx = g * 4 + t;
+                uint3 wb = mul_mod(b[idx + 2], w);
+                c[idx] = add_mod(b[idx], wb);
+                c[idx + 2] = sub_mod(b[idx], wb);
+            }
+        }
+
+        // stage i+3
+        #pragma unroll
+        for (int g = 0; g < 8; g++){
+            int idx = g * 2;
+            uint3 wc = mul_mod(c[idx + 1], w3[g]);
+            parts[base + (size_t)step * idx] = add_mod(c[idx], wc);
+            parts[base + (size_t)step * (idx + 1)] = sub_mod(c[idx], wc);
+        }
+    }
+}
+
 template<int max_local_size>
 __global__ void fft_level_forward_final(
     uint3 * parts, int k, int i,
@@ -467,6 +407,48 @@ __global__ void fft_level_forward_final(
     }
 }
 
+template<int max_local_size>
+__global__ void fft_level_forward_final_initial(
+    uint32_t * A, uint32_t * B,
+    uint3 * parts, int k, 
+    uint3 * roots_table_lv1, uint3 * roots_table_lv2,
+    size_t N, uint32_t L_a, uint32_t L_b
+){
+    uint32_t local_size = 1u << k;
+    uint32_t N_half = N >> 1;
+    __shared__ uint3 local_coefs[max_local_size];
+    for (size_t j = ((size_t)blockIdx.x) << k; j < (N << k); j += gridDim.x << k){
+        uint32_t group = j >> k;
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            uint32_t idx = t;
+            if (group < N_half){
+                local_coefs[t] = make_uint3((idx < L_a) ? A[(size_t)group * L_a + idx] : 0, 0, 0);
+            }else{
+                local_coefs[t] = make_uint3((idx < L_b) ? B[(size_t)(group - N_half) * L_b + idx] : 0, 0, 0);
+            }
+        }
+        __syncthreads();
+        for (int lv = k - 1; lv >= 0; lv--){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                uint3 u = local_coefs[idx];
+                uint3 v = local_coefs[idx + stride];
+                uint3 w = mul_mod(v, twiddle_factor);
+                local_coefs[idx] = add_mod(u, w);
+                local_coefs[idx + stride] = sub_mod(u, w);
+            }
+            __syncthreads();
+        }
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            parts[j + t] = local_coefs[t];
+        }
+        __syncthreads();
+    }
+}
+
 __global__ void pointwise_mul(uint3 * parts_a, uint3 * parts_b, size_t total, uint3 * scalar_ptr){
     uint3 scalar = scalar_ptr[0];
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < total; j += blockDim.x * gridDim.x){
@@ -493,125 +475,6 @@ __global__ void fft_level_backward(uint3 * parts, int k, int i, uint3 * roots_ta
         v = mul_mod(w, twiddle_factor);
         parts[offset +        step_id] = u;
         parts[offset + step + step_id] = v;
-    }
-}
-
-__global__ void fft_level_backward_radix4(uint3 * parts, int k, int i, uint3 * roots_table_lv1, uint3 * roots_table_lv2, size_t N){
-    i--;
-    uint32_t step = 1 << (k - 2 - i);
-    uint32_t seq_len = 1 << i;
-    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 2)); j += blockDim.x * gridDim.x){
-        size_t group = j >> (k - 2 - i);
-        size_t offset = group << (k - i);
-        uint32_t seq_id = (uint32_t)(group & (seq_len - 1));
-        uint32_t step_id = (uint32_t)(j & (step - 1));
-
-        // seq | X | step+1    i
-        // seq+1 | X | step    i + 1
-        // seq | X X | step
-
-        uint32_t bitrev_seq_id = __brev(-__brev(seq_id * 2));
-        uint32_t bitrev_seq_id1 = __brev(-__brev(seq_id * 4));
-        uint32_t bitrev_seq_id2 = __brev(-__brev(seq_id * 4 + 2));
-
-        uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id >> 16], roots_table_lv2[bitrev_seq_id & 0xffff]);
-        uint3 w1 = mul_mod(roots_table_lv1[bitrev_seq_id1 >> 16], roots_table_lv2[bitrev_seq_id1 & 0xffff]);
-        uint3 w2 = mul_mod(roots_table_lv1[bitrev_seq_id2 >> 16], roots_table_lv2[bitrev_seq_id2 & 0xffff]);
-
-
-        size_t base = offset + step_id;
-
-        uint3 y0 = parts[base];
-        uint3 y1 = parts[base + step];
-        uint3 y2 = parts[base + step * 2];
-        uint3 y3 = parts[base + step * 3];
-
-        // stage i + 1
-
-        uint3 a0 = add_mod(y0, y1);
-        uint3 a1 = mul_mod(sub_mod(y0, y1), w1);
-        uint3 a2 = add_mod(y2, y3);
-        uint3 a3 = mul_mod(sub_mod(y2, y3), w2);
-
-        // stage i
-        uint3 x0 = add_mod(a0, a2);
-        uint3 x2 = mul_mod(sub_mod(a0, a2), w0);
-        uint3 x1 = add_mod(a1, a3);
-        uint3 x3 = mul_mod(sub_mod(a1, a3), w0);
-
-        parts[base]              = x0;
-        parts[base + step]       = x1;
-        parts[base + step * 2]   = x2;
-        parts[base + step * 3]   = x3;
-    }
-}
-
-__global__ void fft_level_backward_radix8(uint3 * parts, int k, int i, uint3 * roots_table_lv1, uint3 * roots_table_lv2, size_t N){
-    i -= 2;
-    uint32_t step = 1u << (k - 3 - i);
-    uint32_t seq_len = 1u << i;
-    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 3)); j += blockDim.x * gridDim.x){
-        size_t group = j >> (k - 3 - i);
-        size_t offset = group << (k - i);
-        uint32_t seq_id = (uint32_t)(group & (seq_len - 1));
-        uint32_t step_id = (uint32_t)(j & (step - 1));
-
-        uint32_t bitrev_seq_id0 = __brev(-__brev(seq_id * 2));
-        uint32_t bitrev_seq_id10 = __brev(-__brev(seq_id * 4 + 0));
-        uint32_t bitrev_seq_id11 = __brev(-__brev(seq_id * 4 + 2));
-        uint32_t bitrev_seq_id20 = __brev(-__brev(seq_id * 8 + 0));
-        uint32_t bitrev_seq_id21 = __brev(-__brev(seq_id * 8 + 2));
-        uint32_t bitrev_seq_id22 = __brev(-__brev(seq_id * 8 + 4));
-        uint32_t bitrev_seq_id23 = __brev(-__brev(seq_id * 8 + 6));
-
-        uint3 w0 = mul_mod(roots_table_lv1[bitrev_seq_id0 >> 16], roots_table_lv2[bitrev_seq_id0 & 0xffff]);
-        uint3 w10 = mul_mod(roots_table_lv1[bitrev_seq_id10 >> 16], roots_table_lv2[bitrev_seq_id10 & 0xffff]);
-        uint3 w11 = mul_mod(roots_table_lv1[bitrev_seq_id11 >> 16], roots_table_lv2[bitrev_seq_id11 & 0xffff]);
-        uint3 w20 = mul_mod(roots_table_lv1[bitrev_seq_id20 >> 16], roots_table_lv2[bitrev_seq_id20 & 0xffff]);
-        uint3 w21 = mul_mod(roots_table_lv1[bitrev_seq_id21 >> 16], roots_table_lv2[bitrev_seq_id21 & 0xffff]);
-        uint3 w22 = mul_mod(roots_table_lv1[bitrev_seq_id22 >> 16], roots_table_lv2[bitrev_seq_id22 & 0xffff]);
-        uint3 w23 = mul_mod(roots_table_lv1[bitrev_seq_id23 >> 16], roots_table_lv2[bitrev_seq_id23 & 0xffff]);
-
-        size_t base = offset + step_id;
-
-        uint3 y0 = parts[base];
-        uint3 y1 = parts[base + step];
-        uint3 y2 = parts[base + step * 2];
-        uint3 y3 = parts[base + step * 3];
-        uint3 y4 = parts[base + step * 4];
-        uint3 y5 = parts[base + step * 5];
-        uint3 y6 = parts[base + step * 6];
-        uint3 y7 = parts[base + step * 7];
-
-        // stage i+2
-        uint3 a0 = add_mod(y0, y1);
-        uint3 a1 = mul_mod(sub_mod(y0, y1), w20);
-        uint3 a2 = add_mod(y2, y3);
-        uint3 a3 = mul_mod(sub_mod(y2, y3), w21);
-        uint3 a4 = add_mod(y4, y5);
-        uint3 a5 = mul_mod(sub_mod(y4, y5), w22);
-        uint3 a6 = add_mod(y6, y7);
-        uint3 a7 = mul_mod(sub_mod(y6, y7), w23);
-
-        // stage i+1
-        uint3 b0 = add_mod(a0, a2);
-        uint3 b2 = mul_mod(sub_mod(a0, a2), w10);
-        uint3 b1 = add_mod(a1, a3);
-        uint3 b3 = mul_mod(sub_mod(a1, a3), w10);
-        uint3 b4 = add_mod(a4, a6);
-        uint3 b6 = mul_mod(sub_mod(a4, a6), w11);
-        uint3 b5 = add_mod(a5, a7);
-        uint3 b7 = mul_mod(sub_mod(a5, a7), w11);
-
-        // stage i
-        parts[base]            = add_mod(b0, b4);
-        parts[base + step]     = add_mod(b1, b5);
-        parts[base + step * 2] = add_mod(b2, b6);
-        parts[base + step * 3] = add_mod(b3, b7);
-        parts[base + step * 4] = mul_mod(sub_mod(b0, b4), w0);
-        parts[base + step * 5] = mul_mod(sub_mod(b1, b5), w0);
-        parts[base + step * 6] = mul_mod(sub_mod(b2, b6), w0);
-        parts[base + step * 7] = mul_mod(sub_mod(b3, b7), w0);
     }
 }
 
@@ -1075,79 +938,75 @@ void batch_mul_ntt(
 
         // copy + pointwise mul time : 5.808 ms
 
-        if (true){
-            const int threads_per_block = 512;
-            int num_blocks = min(((((size_t)N) << k) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-            copy_to_parts<<<num_blocks, threads_per_block>>>(parts_a, A, N, k, L_a);
-            copy_to_parts<<<num_blocks, threads_per_block>>>(parts_b, B, N, k, L_b);
-        }
-
         //if (L_a != 33554432){ // 23.238 ms
         //if (L_a != 512 || L_b != 512){ // 8.080 ms
 
         for (int i = 0; i < k; i ++){
-            if (k - i <= 10){
+            if (k - i <= 12){
                 int local_size = 1 << (k - i);
                 int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
-                fft_level_forward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b
-                );
+                if (k - i <= 10){
+                    if (i != 0){
+                        fft_level_forward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
+                            parts_a,
+                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N * 2 // we use 2 * N to do parts_a and parts_b
+                        );
+                    }else{
+                        fft_level_forward_final_initial<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
+                            A, B, parts_a,
+                            k, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N * 2, L_a, L_b
+                        );
+                    }
+                }else if (k - i == 11){
+                    if (i != 0){
+                        fft_level_forward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
+                            parts_a,
+                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N * 2 // we use 2 * N to do parts_a and parts_b
+                        );
+                    }else{
+                        fft_level_forward_final_initial<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
+                            A, B, parts_a,
+                            k, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N * 2, L_a, L_b
+                        );
+                    }
+                }else{
+                    if (i != 0){
+                        fft_level_forward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
+                            parts_a,
+                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N * 2 // we use 2 * N to do parts_a and parts_b
+                        );
+                    }else{
+                        fft_level_forward_final_initial<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
+                            A, B, parts_a,
+                            k, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N * 2, L_a, L_b
+                        );
+                    }
+                }
                 i = k - 1;
-            }else if (k - i == 11){
-                int local_size = 1 << (k - i);
-                int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
-                fft_level_forward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b
-                );
-                i = k - 1;
-            }else if (k - i == 12){
-                int local_size = 1 << (k - i);
-                int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
-                fft_level_forward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b
-                );
-                i = k - 1;
-            }else if (i + 3 < k){
+            }else{
                 const int threads_per_block = 64;
                 int num_blocks = min(((((size_t)N) << (k - 3)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_forward_radix16<<<num_blocks, threads_per_block>>>(
-                    parts_a, // parts_b must be adjacent to it
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
-                );
+                if (i != 0){
+                    fft_level_forward_radix16<<<num_blocks, threads_per_block>>>(
+                        parts_a, // parts_b must be adjacent to it
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
+                    );
+                }else{
+                    fft_level_forward_radix16_initial<<<num_blocks, threads_per_block>>>(
+                        A, B,
+                        parts_a, // parts_b must be adjacent to it
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N * 2, L_a, L_b
+                    );
+                }
                 i += 3;
-            }else if (i + 2 < k){
-                const int threads_per_block = 128;
-                int num_blocks = min(((((size_t)N) << (k - 2)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_forward_radix8<<<num_blocks, threads_per_block>>>(
-                    parts_a, // parts_b must be adjacent to it
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
-                );
-                i += 2;
-            }else if (i + 1 < k){
-                const int threads_per_block = 256;
-                int num_blocks = min(((((size_t)N) << (k - 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_forward_radix4<<<num_blocks, threads_per_block>>>(
-                    parts_a, // parts_b must be adjacent to it
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
-                );
-                i++;
-            }else{
-                const int threads_per_block = 512;
-                int num_blocks = min(((((size_t)N) << (k)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_forward<<<num_blocks, threads_per_block>>>(
-                    parts_a, // parts_b must be adjacent to it
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
-                );
             }
         }
 
@@ -1166,6 +1025,9 @@ void batch_mul_ntt(
         for (int i = k - 1; i >= 0; i --){
             if (i == k - 1){
                 int i0 = max(0, i - 11);
+                if (i0 != 0){
+                    i0 += (4 - i0) & 3;
+                }
                 int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
                 int local_size = 1 << (k - i0);
                 if (local_size <= 1024){
@@ -1188,7 +1050,7 @@ void batch_mul_ntt(
                     );
                 }
                 i = i0;
-            }else if (i - 3 > 0){
+            }else{
                 const int threads_per_block = 64;
                 int num_blocks = min(((((size_t)N) << (k - 4)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
                 fft_level_backward_radix16<<<num_blocks, threads_per_block>>>(
@@ -1197,32 +1059,6 @@ void batch_mul_ntt(
                     N
                 );
                 i -= 3;
-            }else if (i - 2 > 0){
-                const int threads_per_block = 128;
-                int num_blocks = min(((((size_t)N) << (k - 3)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_backward_radix8<<<num_blocks, threads_per_block>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N
-                );
-                i -= 2;
-            }else if (i - 1 > 0){
-                const int threads_per_block = 256;
-                int num_blocks = min(((((size_t)N) << (k - 2)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_backward_radix4<<<num_blocks, threads_per_block>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N
-                );
-                i--;
-            }else{
-                const int threads_per_block = 512;
-                int num_blocks = min(((((size_t)N) << (k - 1)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_backward<<<num_blocks, threads_per_block>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N
-                );
             }
         }
 
