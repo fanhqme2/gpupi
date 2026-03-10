@@ -1,5 +1,6 @@
 #include "batch_mul_ntt.h"
 #include "batch_mul_addsub_asm.h"
+#include "batch_mul_addsub_warp.h"
 #include <cuda/warp>
 
 const uint32_t arr_root0 = 0x46038aeb;
@@ -838,9 +839,10 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
     }
 }
 
-__global__ void add3_reduce_blocks(uint3 * parts, ushort2 * ret_carry, size_t N, int k, size_t L){
+__global__ void add3_reduce_blocks(uint3 * parts, uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
     __shared__ ushort2 carryInfo[32];
     parts += ((size_t)blockIdx.x) << k;
+    ret += ((size_t)blockIdx.x) * L;
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
     ret_carry += ((size_t)blockIdx.x) * blocks_per_num;
@@ -905,10 +907,34 @@ __global__ void add3_reduce_blocks(uint3 * parts, ushort2 * ret_carry, size_t N,
                 if (threadIdx.x == 31){
                     ret_carry[i0 / block_size] = bc;
                 }
+                bc.y = 0;
+                carryInfo[threadIdx.x] = bc;
+            }
+            __syncthreads();
+
+            ushort compound = carry.y + ((threadIdx.y > 0) ? carryInfo[threadIdx.y - 1].x : 0);
+            carry.x += compound >> 2;
+            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
+            if (threadIdx.x == 0){
+                if (threadIdx.y == 0){
+                    carry.x = 0;
+                }else{
+                    carry.x = carryInfo[threadIdx.y - 1].x;
+                }
+            }
+            r0_value = add_cc(r0_value, (uint32_t)carry.x);
+            r1_value = addc_cc(r1_value, 0);
+
+            if (i < L){
+                ret[i] = r0_value;
+            }
+            if (i + 1 < L){
+                ret[i + 1] = r1_value;
             }
             __syncthreads();
         }
         parts += ((size_t)gridDim.x) << k;
+        ret += ((size_t)L) * gridDim.x;
         ret_carry += blocks_per_num * gridDim.x;
     }
 }
@@ -978,101 +1004,35 @@ __global__ void add3_combine_blocks(ushort2 * ret_carry, uint32_t N, uint32_t L)
     }
 }
 
-__global__ void add3_apply_blocks(uint3 * parts, uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
-    __shared__ ushort2 carryInfo[32];
-    parts += ((size_t)blockIdx.x) << k;
+__global__ void add3_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
+    __shared__ uint32_t carryInfo[32];
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
     ret_carry += ((size_t)blockIdx.x) * blocks_per_num;
     ret += ((size_t)blockIdx.x) * L;
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
-        for (size_t i0 = blockIdx.y * block_size; i0 < L; i0 += block_size * gridDim.y){
-            uint32_t block_carry = ret_carry[i0 / block_size].x;
+        for (size_t i0 = blockIdx.y * block_size; i0 < L; i0 += block_size * gridDim.y){       
+            uint32_t block_carry = ret_carry[i0 / block_size].x;     
+            if (block_carry){
+                uint32_t i = i0 + (threadIdx.y * 32 + threadIdx.x) * 2;
+                uint32_t r0_value = (i < L) ? ret[i] : 0;
+                uint32_t r1_value = (i + 1 < L) ? ret[i + 1] : 0;
+                uint32_t c0_value = (i == i0) ? block_carry : 0;
+                uint32_t c1_value = 0;
+                uint32_t r0_value_old = r0_value;
+                batch_mul_add_64_all_warp<32>(r0_value, r1_value, c0_value, c1_value, carryInfo);
 
-            uint32_t i = i0 + (threadIdx.y * 32 + threadIdx.x) * 2;
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
-            uint32_t t0_value, t1_value;
-            r0_value = parts[i].x;
-            r1_value = parts[i + 1].x;
-            c0_value = (i == 0) ? 0 : parts[i - 1].y;
-            c1_value = parts[i].y;
-            t0_value = (i <= 1) ? 0 : parts[i - 2].z;
-            t1_value = (i == 0) ? 0 : parts[i - 1].z;
-            ushort2 carry;
-
-            r0_value = add_cc(r0_value, c0_value);
-            r1_value = addc_cc(r1_value, c1_value);
-            carry.x = addc(0, 0);
-            r0_value = add_cc(r0_value, t0_value);
-            r1_value = addc_cc(r1_value, t1_value);
-            carry.x += addc(0, 0);
-            add_cc(r0_value, 2);
-            addc_cc(r1_value, 0);
-            if (addc(0, 0)){
-                carry.y = r0_value & 3;
-            }else{
-                carry.y = 0;
-            }
-            for (int delta = 1; delta < 32; delta *= 2){
-                ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
-                if (threadIdx.x >= delta){
-                    ushort compound = carry.y + carry_prev.x;
-                    carry.x += compound >> 2;
-                    if ((compound & 3) == 3){
-                        carry.y = carry_prev.y;
-                    }else{
-                        carry.y = 0;
+                if (r0_value != r0_value_old){
+                    if (i < L){
+                        ret[i] = r0_value;
+                    }
+                    if (i + 1 < L){
+                        ret[i + 1] = r1_value;
                     }
                 }
+                __syncthreads();
             }
-            if (threadIdx.x == 32 - 1){
-                carryInfo[threadIdx.y] = carry;
-            }
-            __syncthreads();
-
-            if (threadIdx.y == 0){
-                ushort2 bc = carryInfo[threadIdx.x];
-                for (int delta = 1; delta < blockDim.y; delta *= 2){
-                    ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(bc, delta);
-                    if (threadIdx.x >= delta){
-                        ushort compound = bc.y + carry_prev.x;
-                        bc.x += compound >> 2;
-                        if ((compound & 3) == 3){
-                            bc.y = carry_prev.y;
-                        }else{
-                            bc.y = 0;
-                        }
-                    }
-                }
-                ushort compound = bc.y + block_carry;
-                bc.x += compound >> 2;
-                bc.y = 0;
-                carryInfo[threadIdx.x] = bc;
-            }
-            __syncthreads();
-            ushort compound = carry.y + ((threadIdx.y > 0) ? carryInfo[threadIdx.y - 1].x : block_carry);
-            carry.x += compound >> 2;
-            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
-            if (threadIdx.x == 0){
-                if (threadIdx.y == 0){
-                    carry.x = block_carry;
-                }else{
-                    carry.x = carryInfo[threadIdx.y - 1].x;
-                }
-            }
-            r0_value = add_cc(r0_value, (uint32_t)carry.x);
-            r1_value = addc_cc(r1_value, 0);
-
-            if (i < L){
-                ret[i] = r0_value;
-            }
-            if (i + 1 < L){
-                ret[i + 1] = r1_value;
-            }
-            __syncthreads();
         }
-        parts += ((size_t)gridDim.x) << k;
         ret_carry += blocks_per_num * gridDim.x;
         ret += ((size_t)L) * gridDim.x;
     }
@@ -1256,13 +1216,13 @@ void batch_mul_ntt(
             int num_blocks_y = min((size_t)256, max((size_t)1, (L + block_size - 1) / block_size));
             int num_blocks_x = min(N, 65536 / num_blocks_y);
             add3_reduce_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
-                parts_a, reinterpret_cast<ushort2 *>(parts_b), N, k, L
+                parts_a, ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
             );
             add3_combine_blocks<<<min(N, 65536), dim3(32, 32, 1)>>>(
                 reinterpret_cast<ushort2 *>(parts_b), N, L
             );
             add3_apply_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
-                parts_a, ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
+                ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
             );
         }
         
