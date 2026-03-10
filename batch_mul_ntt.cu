@@ -700,6 +700,7 @@ __global__ void fft_level_backward_radix16(uint3 * parts, int k, int i, uint3 * 
     }
 }
 
+template<int max_local_size>
 __global__ void fft_level_backward_final(
     uint3 * parts, int k, int i,
     uint3 * roots_table_lv1, uint3 * roots_table_lv2,
@@ -707,7 +708,7 @@ __global__ void fft_level_backward_final(
 ){
     uint32_t local_size = 1u << (k - i);
     uint32_t seq_len = 1u << i;
-    __shared__ uint3 local_coefs[1024];
+    __shared__ uint3 local_coefs[max_local_size];
     for (size_t j = ((size_t)blockIdx.x) << (k - i); j < (N << k); j += gridDim.x << (k - i)){
         uint32_t seq_id = (j >> (k - i)) & (seq_len - 1);
         for (int t = threadIdx.x; t < local_size; t += blockDim.x){
@@ -1103,6 +1104,15 @@ void batch_mul_ntt(
                     N * 2 // we use 2 * N to do parts_a and parts_b
                 );
                 i = k - 1;
+            }else if (k - i == 12){
+                int local_size = 1 << (k - i);
+                int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
+                fft_level_forward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
+                    parts_a,
+                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                    N * 2 // we use 2 * N to do parts_a and parts_b
+                );
+                i = k - 1;
             }else if (i + 3 < k){
                 const int threads_per_block = 64;
                 int num_blocks = min(((((size_t)N) << (k - 3)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
@@ -1155,14 +1165,28 @@ void batch_mul_ntt(
         
         for (int i = k - 1; i >= 0; i --){
             if (i == k - 1){
-                int i0 = max(0, i - 9);
+                int i0 = max(0, i - 11);
                 int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
                 int local_size = 1 << (k - i0);
-                fft_level_backward_final<<<num_blocks, min(local_size >> 1, 256)>>>(
-                    parts_a,
-                    k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N
-                );
+                if (local_size <= 1024){
+                    fft_level_backward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
+                        parts_a,
+                        k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N
+                    );
+                }else if (local_size == 2048){
+                    fft_level_backward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
+                        parts_a,
+                        k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N
+                    );
+                }else{
+                    fft_level_backward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
+                        parts_a,
+                        k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N
+                    );
+                }
                 i = i0;
             }else if (i - 3 > 0){
                 const int threads_per_block = 64;
