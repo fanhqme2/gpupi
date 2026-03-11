@@ -386,10 +386,14 @@ __global__ void fft_level_forward_radix32(
             for (int t = threadIdx.y; t < 16; t += blockDim.y){
                 int idx = ((t >> lv) << lv) + t;
                 uint32_t bitrev_seq_id = ((seq_id << (4 - lv)) | (idx >> (lv + 1))) * 2;
-                uint3 twiddle_factor = mul_mod(
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                if (bitrev_seq_id >= 65536){
+                    twiddle_factor = mul_mod(twiddle_factor, roots_table_lv1[bitrev_seq_id >> 16]);
+                }
+                /*uint3 twiddle_factor = mul_mod(
                     roots_table_lv1[bitrev_seq_id >> 16],
                     roots_table_lv2[bitrev_seq_id & 0xffff]
-                );
+                );*/
                 uint3 u = local_coefs[idx][threadIdx.x];
                 uint3 v = local_coefs[idx + stride][threadIdx.x];
                 uint3 w = mul_mod(v, twiddle_factor);
@@ -436,10 +440,14 @@ __global__ void fft_level_forward_radix32_initial(
             for (int t = threadIdx.y; t < 16; t += blockDim.y){
                 int idx = ((t >> lv) << lv) + t;
                 uint32_t bitrev_seq_id = ((seq_id << (4 - lv)) | (idx >> (lv + 1))) * 2;
-                uint3 twiddle_factor = mul_mod(
+                /*uint3 twiddle_factor = mul_mod(
                     roots_table_lv1[bitrev_seq_id >> 16],
                     roots_table_lv2[bitrev_seq_id & 0xffff]
-                );
+                );*/
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                if (bitrev_seq_id >= 65536){
+                    twiddle_factor = mul_mod(twiddle_factor, roots_table_lv1[bitrev_seq_id >> 16]);
+                }
                 uint3 u = local_coefs[idx][threadIdx.x];
                 uint3 v = local_coefs[idx + stride][threadIdx.x];
                 uint3 w = mul_mod(v, twiddle_factor);
@@ -680,10 +688,14 @@ __global__ void fft_level_backward_radix32(
                 int idx = ((t >> lv) << lv) + t;
                 uint32_t bitrev_seq_id = ((seq_id << (4 - lv)) | (idx >> (lv + 1))) * 2;
                 bitrev_seq_id = __brev(-__brev(bitrev_seq_id));
-                uint3 twiddle_factor = mul_mod(
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                if (bitrev_seq_id >= 65536){
+                    twiddle_factor = mul_mod(twiddle_factor, roots_table_lv1[bitrev_seq_id >> 16]);
+                }
+                /*uint3 twiddle_factor = mul_mod(
                     roots_table_lv1[bitrev_seq_id >> 16],
                     roots_table_lv2[bitrev_seq_id & 0xffff]
-                );
+                );*/
                 uint3 u = local_coefs[idx][threadIdx.x];
                 uint3 v = local_coefs[idx + stride][threadIdx.x];
                 local_coefs[idx][threadIdx.x] = add_mod(u, v);
@@ -1127,7 +1139,7 @@ void batch_mul_ntt(
                 i = k - 1;
             }else{
                 int num_blocks = min(((size_t)N) << (k - 9), (size_t)65536);
-                if (k >= 26 || (i != 0 && k - i == 21) ||  (i != 0 && k - i == 16)){
+                if (k >= 22 ||  (i != 0 && k - i == 16)){
                     if (i != 0){
                         fft_level_forward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
                             parts_a, // parts_b must be adjacent to it
