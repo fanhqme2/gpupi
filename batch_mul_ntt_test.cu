@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include <cuda_runtime.h>
+#include <curand.h>
 #include <gmp.h>
 
 #include "batch_mul_ntt.h"
@@ -18,8 +19,240 @@
     } \
 } while (0)
 
+#define CURAND_CHECK(call) do { \
+    curandStatus_t _err = (call); \
+    if (_err != CURAND_STATUS_SUCCESS) { \
+        fprintf(stderr, "cuRAND error at %s:%d: %d\n", __FILE__, __LINE__, (int)_err); \
+        exit(1); \
+    } \
+} while (0)
+
+constexpr uint32_t QUICK_CHECK_MOD = 10007u;
+constexpr uint32_t QUICK_CHECK_THREADS = 256u;
+
 static void words_to_mpz(mpz_t out, const uint32_t* words, size_t count) {
     mpz_import(out, count, -1, sizeof(uint32_t), 0, 0, words);
+}
+
+struct QuickCheckFailure {
+    uint32_t index;
+    uint32_t expected;
+    uint32_t got;
+};
+
+__global__ static void reduce_words_mod_chunks_kernel(
+    const uint32_t* words,
+    uint32_t words_per_number,
+    uint32_t chunk_count,
+    const uint32_t* chunk_base_pow_mod,
+    const uint32_t* local_pow_mod,
+    uint32_t* partials
+) {
+    __shared__ uint32_t shared[QUICK_CHECK_THREADS];
+
+    const uint32_t block = blockIdx.x;
+    const uint32_t number_idx = block / chunk_count;
+    const uint32_t chunk_idx = block % chunk_count;
+    const uint32_t chunk_start = chunk_idx * QUICK_CHECK_THREADS;
+    const size_t base_offset = (size_t)number_idx * words_per_number + chunk_start;
+
+    uint32_t thread_sum = 0;
+    for (uint32_t i = threadIdx.x; i < QUICK_CHECK_THREADS; i += blockDim.x) {
+        const uint32_t word_idx = chunk_start + i;
+        if (word_idx < words_per_number) {
+            const uint32_t scaled =
+                (uint32_t)(((uint64_t)(words[base_offset + i] % QUICK_CHECK_MOD) * local_pow_mod[i]) % QUICK_CHECK_MOD);
+            const uint32_t weighted =
+                (uint32_t)(((uint64_t)scaled * chunk_base_pow_mod[chunk_idx]) % QUICK_CHECK_MOD);
+            thread_sum += weighted;
+            if (thread_sum >= QUICK_CHECK_MOD) thread_sum -= QUICK_CHECK_MOD;
+        }
+    }
+
+    shared[threadIdx.x] = thread_sum;
+    __syncthreads();
+
+    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            uint32_t v = shared[threadIdx.x] + shared[threadIdx.x + stride];
+            if (v >= QUICK_CHECK_MOD) v -= QUICK_CHECK_MOD;
+            shared[threadIdx.x] = v;
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        partials[(size_t)number_idx * chunk_count + chunk_idx] = shared[0];
+    }
+}
+
+__global__ static void reduce_partials_mod_chunks_kernel(
+    const uint32_t* input,
+    uint32_t values_per_number,
+    uint32_t chunk_count,
+    uint32_t* output
+) {
+    __shared__ uint32_t shared[QUICK_CHECK_THREADS];
+
+    const uint32_t block = blockIdx.x;
+    const uint32_t number_idx = block / chunk_count;
+    const uint32_t chunk_idx = block % chunk_count;
+    const uint32_t chunk_start = chunk_idx * QUICK_CHECK_THREADS;
+    const size_t base_offset = (size_t)number_idx * values_per_number + chunk_start;
+
+    uint32_t thread_sum = 0;
+    for (uint32_t i = threadIdx.x; i < QUICK_CHECK_THREADS; i += blockDim.x) {
+        const uint32_t value_idx = chunk_start + i;
+        if (value_idx < values_per_number) {
+            thread_sum += input[base_offset + i];
+            if (thread_sum >= QUICK_CHECK_MOD) thread_sum -= QUICK_CHECK_MOD;
+        }
+    }
+
+    shared[threadIdx.x] = thread_sum;
+    __syncthreads();
+
+    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            uint32_t v = shared[threadIdx.x] + shared[threadIdx.x + stride];
+            if (v >= QUICK_CHECK_MOD) v -= QUICK_CHECK_MOD;
+            shared[threadIdx.x] = v;
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        output[(size_t)number_idx * chunk_count + chunk_idx] = shared[0];
+    }
+}
+
+__global__ static void compare_products_mod_kernel(
+    const uint32_t* a_mod,
+    const uint32_t* b_mod,
+    const uint32_t* ret_mod,
+    uint32_t N,
+    QuickCheckFailure* failure
+) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        const uint32_t expected = (uint32_t)(((uint64_t)a_mod[i] * b_mod[i]) % QUICK_CHECK_MOD);
+        if (expected != ret_mod[i]) {
+            if (atomicCAS(&failure->index, 0xffffffffu, i) == 0xffffffffu) {
+                failure->expected = expected;
+                failure->got = ret_mod[i];
+            }
+        }
+    }
+}
+
+static void reduce_numbers_mod_10007_cuda(
+    const uint32_t* d_words,
+    uint32_t N,
+    uint32_t words_per_number,
+    const uint32_t* d_chunk_base_pow_mod,
+    const uint32_t* d_local_pow_mod,
+    uint32_t* d_stage0,
+    uint32_t* d_stage1,
+    uint32_t* d_out
+) {
+    uint32_t current_count = (words_per_number + QUICK_CHECK_THREADS - 1) / QUICK_CHECK_THREADS;
+    const uint32_t initial_blocks = N * current_count;
+    reduce_words_mod_chunks_kernel<<<initial_blocks, QUICK_CHECK_THREADS>>>(
+        d_words, words_per_number, current_count, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0);
+    CUDA_CHECK(cudaGetLastError());
+
+    uint32_t* current = d_stage0;
+    uint32_t* next = d_stage1;
+    while (current_count > 1) {
+        const uint32_t next_count = (current_count + QUICK_CHECK_THREADS - 1) / QUICK_CHECK_THREADS;
+        const uint32_t blocks = N * next_count;
+        reduce_partials_mod_chunks_kernel<<<blocks, QUICK_CHECK_THREADS>>>(
+            current, current_count, next_count, next);
+        CUDA_CHECK(cudaGetLastError());
+        current = next;
+        next = (next == d_stage1) ? d_stage0 : d_stage1;
+        current_count = next_count;
+    }
+
+    CUDA_CHECK(cudaMemcpy(d_out, current, (size_t)N * sizeof(uint32_t), cudaMemcpyDeviceToDevice));
+}
+
+static void quick_check_products_mod_10007_cuda(
+    const uint32_t* d_A,
+    const uint32_t* d_B,
+    const uint32_t* d_ret,
+    uint32_t N,
+    uint32_t L_a,
+    uint32_t L_b
+) {
+    const uint32_t L = L_a + L_b;
+    const uint32_t max_words = std::max(L, std::max(L_a, L_b));
+    const uint32_t chunk_capacity = (max_words + QUICK_CHECK_THREADS - 1) / QUICK_CHECK_THREADS;
+    const size_t stage_size = (size_t)N * chunk_capacity * sizeof(uint32_t);
+
+    std::vector<uint32_t> h_chunk_base_pow_mod(chunk_capacity);
+    std::vector<uint32_t> h_local_pow_mod(QUICK_CHECK_THREADS);
+    const uint32_t base_mod = (uint32_t)((1ull << 32) % QUICK_CHECK_MOD);
+    h_local_pow_mod[0] = 1;
+    for (uint32_t i = 1; i < QUICK_CHECK_THREADS; ++i) {
+        h_local_pow_mod[i] = (uint32_t)(((uint64_t)h_local_pow_mod[i - 1] * base_mod) % QUICK_CHECK_MOD);
+    }
+    const uint32_t chunk_stride_pow =
+        (uint32_t)(((uint64_t)h_local_pow_mod[QUICK_CHECK_THREADS - 1] * base_mod) % QUICK_CHECK_MOD);
+    h_chunk_base_pow_mod[0] = 1;
+    for (uint32_t i = 1; i < chunk_capacity; ++i) {
+        h_chunk_base_pow_mod[i] =
+            (uint32_t)(((uint64_t)h_chunk_base_pow_mod[i - 1] * chunk_stride_pow) % QUICK_CHECK_MOD);
+    }
+
+    uint32_t* d_chunk_base_pow_mod = nullptr;
+    uint32_t* d_local_pow_mod = nullptr;
+    uint32_t* d_stage0 = nullptr;
+    uint32_t* d_stage1 = nullptr;
+    uint32_t* d_a_mod = nullptr;
+    uint32_t* d_b_mod = nullptr;
+    uint32_t* d_ret_mod = nullptr;
+    QuickCheckFailure* d_failure = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_chunk_base_pow_mod, (size_t)chunk_capacity * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_local_pow_mod, (size_t)QUICK_CHECK_THREADS * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_stage0, stage_size));
+    CUDA_CHECK(cudaMalloc(&d_stage1, stage_size));
+    CUDA_CHECK(cudaMalloc(&d_a_mod, (size_t)N * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_b_mod, (size_t)N * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_ret_mod, (size_t)N * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_failure, sizeof(QuickCheckFailure)));
+
+    CUDA_CHECK(cudaMemcpy(d_chunk_base_pow_mod, h_chunk_base_pow_mod.data(),
+                          (size_t)chunk_capacity * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_local_pow_mod, h_local_pow_mod.data(),
+                          (size_t)QUICK_CHECK_THREADS * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_failure, 0xff, sizeof(QuickCheckFailure)));
+
+    reduce_numbers_mod_10007_cuda(d_A, N, L_a, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_a_mod);
+    reduce_numbers_mod_10007_cuda(d_B, N, L_b, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_b_mod);
+    reduce_numbers_mod_10007_cuda(d_ret, N, L, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_ret_mod);
+
+    const uint32_t compare_blocks = (N + QUICK_CHECK_THREADS - 1) / QUICK_CHECK_THREADS;
+    compare_products_mod_kernel<<<compare_blocks, QUICK_CHECK_THREADS>>>(d_a_mod, d_b_mod, d_ret_mod, N, d_failure);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    QuickCheckFailure h_failure;
+    CUDA_CHECK(cudaMemcpy(&h_failure, d_failure, sizeof(QuickCheckFailure), cudaMemcpyDeviceToHost));
+    if (h_failure.index != 0xffffffffu) {
+        printf("  WARNING: quick correctness check failed at index %u (mod 10007: expected %u, got %u)\n",
+               h_failure.index, h_failure.expected, h_failure.got);
+    }
+
+    CUDA_CHECK(cudaFree(d_chunk_base_pow_mod));
+    CUDA_CHECK(cudaFree(d_local_pow_mod));
+    CUDA_CHECK(cudaFree(d_stage0));
+    CUDA_CHECK(cudaFree(d_stage1));
+    CUDA_CHECK(cudaFree(d_a_mod));
+    CUDA_CHECK(cudaFree(d_b_mod));
+    CUDA_CHECK(cudaFree(d_ret_mod));
+    CUDA_CHECK(cudaFree(d_failure));
 }
 
 static uint32_t floor_log2_u32(uint32_t x) {
@@ -159,19 +392,23 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
     uint32_t N = (uint32_t)(target_NL / L_a);
     if (N == 0) N = 1;
     const uint32_t L = L_a + L_b;
+    const size_t size_A_words = (size_t)N * L_a;
+    const size_t size_B_words = (size_t)N * L_b;
+    const size_t size_ret_words = (size_t)N * L;
 
     printf("Benchmarking L_a=%u, L_b=%u, N=%u (N*L_a=%llu)...\n",
            L_a, L_b, N, (unsigned long long)((uint64_t)N * L_a));
 
-    const size_t size_A = (size_t)N * L_a * sizeof(uint32_t);
-    const size_t size_B = (size_t)N * L_b * sizeof(uint32_t);
-    const size_t size_ret = (size_t)N * L * sizeof(uint32_t);
+    const size_t size_A = size_A_words * sizeof(uint32_t);
+    const size_t size_B = size_B_words * sizeof(uint32_t);
+    const size_t size_ret = size_ret_words * sizeof(uint32_t);
     const size_t workspace_size = batch_mul_ntt_workspace_size(N, L_a, L_b);
 
     uint32_t* d_A = nullptr;
     uint32_t* d_B = nullptr;
     uint32_t* d_ret = nullptr;
     uint32_t* d_workspace = nullptr;
+    curandGenerator_t rand_gen = nullptr;
 
     cudaError_t err = cudaMalloc(&d_A, size_A);
     if (err != cudaSuccess) {
@@ -205,7 +442,15 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
         int((size_A + size_B + size_ret) / 1000000),
         int(workspace_size / 1000000));
 
+    CURAND_CHECK(curandCreateGenerator(&rand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+    CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(rand_gen, 0x4d595df4ULL));
+    CURAND_CHECK(curandGenerate(rand_gen, d_A, size_A_words));
+    CURAND_CHECK(curandGenerate(rand_gen, d_B, size_B_words));
+    CURAND_CHECK(curandGenerate(rand_gen, d_ret, size_ret_words));
+
     // Warmup
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
     batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -234,6 +479,9 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
     printf("Mul/s: %8.2f K ", mul_per_sec_thousand);
     printf("Bandwidth (A+B+ret): %6.2f GB/s\n", bandwidth_gb_s);
 
+    quick_check_products_mod_10007_cuda(d_A, d_B, d_ret, N, L_a, L_b);
+
+    CURAND_CHECK(curandDestroyGenerator(rand_gen));
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
     CUDA_CHECK(cudaFree(d_A));
@@ -314,39 +562,39 @@ done:
 
 /*
 Benchmarking L_a=512, L_b=512, N=195312 (N*L_a=99999744)...
-  params size 1599M, workspace size   95M   Average time: 11.942 ms Mul/s: 16354.81 K Bandwidth (A+B+ret): 133.98 GB/s
+  params size 1599M, workspace size   95M   Average time: 12.994 ms Mul/s: 15030.83 K Bandwidth (A+B+ret): 123.13 GB/s
 Benchmarking L_a=1024, L_b=1024, N=97656 (N*L_a=99999744)...
-  params size 1599M, workspace size   95M   Average time: 13.434 ms Mul/s:  7269.30 K Bandwidth (A+B+ret): 119.10 GB/s
+  params size 1599M, workspace size   95M   Average time: 14.716 ms Mul/s:  6636.23 K Bandwidth (A+B+ret): 108.73 GB/s
 Benchmarking L_a=2048, L_b=2048, N=48828 (N*L_a=99999744)...
-  params size 1599M, workspace size   95M   Average time: 15.395 ms Mul/s:  3171.68 K Bandwidth (A+B+ret): 103.93 GB/s
+  params size 1599M, workspace size   95M   Average time: 16.618 ms Mul/s:  2938.35 K Bandwidth (A+B+ret):  96.28 GB/s
 Benchmarking L_a=4096, L_b=4096, N=24414 (N*L_a=99999744)...
-  params size 1599M, workspace size   95M   Average time: 16.219 ms Mul/s:  1505.27 K Bandwidth (A+B+ret):  98.65 GB/s
+  params size 1599M, workspace size   95M   Average time: 17.466 ms Mul/s:  1397.81 K Bandwidth (A+B+ret):  91.61 GB/s
 Benchmarking L_a=8192, L_b=8192, N=12207 (N*L_a=99999744)...
-  params size 1599M, workspace size   95M   Average time: 16.839 ms Mul/s:   724.93 K Bandwidth (A+B+ret):  95.02 GB/s
+  params size 1599M, workspace size   95M   Average time: 18.260 ms Mul/s:   668.49 K Bandwidth (A+B+ret):  87.62 GB/s
 Benchmarking L_a=16384, L_b=16384, N=6103 (N*L_a=99991552)...
-  params size 1599M, workspace size   95M   Average time: 18.797 ms Mul/s:   324.68 K Bandwidth (A+B+ret):  85.11 GB/s
+  params size 1599M, workspace size   95M   Average time: 20.688 ms Mul/s:   295.00 K Bandwidth (A+B+ret):  77.33 GB/s
 Benchmarking L_a=32768, L_b=32768, N=3051 (N*L_a=99975168)...
-  params size 1599M, workspace size   95M   Average time: 20.588 ms Mul/s:   148.19 K Bandwidth (A+B+ret):  77.70 GB/s
+  params size 1599M, workspace size   95M   Average time: 22.623 ms Mul/s:   134.86 K Bandwidth (A+B+ret):  70.71 GB/s
 Benchmarking L_a=65536, L_b=65536, N=1525 (N*L_a=99942400)...
-  params size 1599M, workspace size   94M   Average time: 22.558 ms Mul/s:    67.60 K Bandwidth (A+B+ret):  70.89 GB/s
+  params size 1599M, workspace size   94M   Average time: 24.850 ms Mul/s:    61.37 K Bandwidth (A+B+ret):  64.35 GB/s
 Benchmarking L_a=131072, L_b=131072, N=762 (N*L_a=99876864)...
-  params size 1598M, workspace size   94M   Average time: 23.505 ms Mul/s:    32.42 K Bandwidth (A+B+ret):  67.99 GB/s
+  params size 1598M, workspace size   94M   Average time: 25.680 ms Mul/s:    29.67 K Bandwidth (A+B+ret):  62.23 GB/s
 Benchmarking L_a=262144, L_b=262144, N=381 (N*L_a=99876864)...
-  params size 1598M, workspace size   88M   Average time: 24.669 ms Mul/s:    15.44 K Bandwidth (A+B+ret):  64.78 GB/s
+  params size 1598M, workspace size   88M   Average time: 26.769 ms Mul/s:    14.23 K Bandwidth (A+B+ret):  59.70 GB/s
 Benchmarking L_a=524288, L_b=524288, N=190 (N*L_a=99614720)...
-  params size 1593M, workspace size   75M   Average time: 26.166 ms Mul/s:     7.26 K Bandwidth (A+B+ret):  60.91 GB/s
+  params size 1593M, workspace size   75M   Average time: 28.621 ms Mul/s:     6.64 K Bandwidth (A+B+ret):  55.69 GB/s
 Benchmarking L_a=1048576, L_b=1048576, N=95 (N*L_a=99614720)...
-  params size 1593M, workspace size   50M   Average time: 30.356 ms Mul/s:     3.13 K Bandwidth (A+B+ret):  52.50 GB/s
+  params size 1593M, workspace size   50M   Average time: 32.689 ms Mul/s:     2.91 K Bandwidth (A+B+ret):  48.76 GB/s
 Benchmarking L_a=2097152, L_b=2097152, N=47 (N*L_a=98566144)...
-  params size 1577M, workspace size  100M   Average time: 30.418 ms Mul/s:     1.55 K Bandwidth (A+B+ret):  51.85 GB/s
+  params size 1577M, workspace size  100M   Average time: 32.496 ms Mul/s:     1.45 K Bandwidth (A+B+ret):  48.53 GB/s
 Benchmarking L_a=4194304, L_b=4194304, N=23 (N*L_a=96468992)...
-  params size 1543M, workspace size  201M   Average time: 38.940 ms Mul/s:     0.59 K Bandwidth (A+B+ret):  39.64 GB/s
+  params size 1543M, workspace size  201M   Average time: 40.230 ms Mul/s:     0.57 K Bandwidth (A+B+ret):  38.37 GB/s
 Benchmarking L_a=8388608, L_b=8388608, N=11 (N*L_a=92274688)...
-  params size 1476M, workspace size  402M   Average time: 41.747 ms Mul/s:     0.26 K Bandwidth (A+B+ret):  35.37 GB/s
+  params size 1476M, workspace size  402M   Average time: 43.093 ms Mul/s:     0.26 K Bandwidth (A+B+ret):  34.26 GB/s
 Benchmarking L_a=16777216, L_b=16777216, N=5 (N*L_a=83886080)...
-  params size 1342M, workspace size  805M   Average time: 39.078 ms Mul/s:     0.13 K Bandwidth (A+B+ret):  34.35 GB/s
+  params size 1342M, workspace size  805M   Average time: 40.285 ms Mul/s:     0.12 K Bandwidth (A+B+ret):  33.32 GB/s
 Benchmarking L_a=33554432, L_b=33554432, N=2 (N*L_a=67108864)...
-  params size 1073M, workspace size 1610M   Average time: 32.260 ms Mul/s:     0.06 K Bandwidth (A+B+ret):  33.28 GB/s
+  params size 1073M, workspace size 1610M   Average time: 33.484 ms Mul/s:     0.06 K Bandwidth (A+B+ret):  32.07 GB/s
 Benchmarking L_a=67108864, L_b=67108864, N=1 (N*L_a=67108864)...
-  params size 1073M, workspace size 3221M   Average time: 33.891 ms Mul/s:     0.03 K Bandwidth (A+B+ret):  31.68 GB/s
+  params size 1073M, workspace size 3221M   Average time: 35.293 ms Mul/s:     0.03 K Bandwidth (A+B+ret):  30.42 GB/s
 */
