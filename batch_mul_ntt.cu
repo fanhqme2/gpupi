@@ -654,6 +654,51 @@ __global__ void fft_level_backward_radix16(uint3 * parts, int k, int i, uint3 * 
     }
 }
 
+__global__ void fft_level_backward_radix32(
+    uint3 *parts, int k, int i,
+    uint3 *roots_table_lv1, uint3 *roots_table_lv2,
+    size_t N
+){
+    __shared__ uint3 local_coefs[32][32];
+    i -= 4;
+    const uint32_t step = 1u << (k - 5 - i);
+    const uint32_t seq_len = 1u << i;
+    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 5)); j += blockDim.x * gridDim.x){
+        size_t group = j >> (k - 5 - i);
+        size_t offset = group << (k - i);
+        uint32_t seq_id = (uint32_t)(group & (seq_len - 1));
+        uint32_t step_id = (uint32_t)(j & (step - 1));
+
+        for (int t = threadIdx.y; t < 32; t += blockDim.y){
+            local_coefs[t][threadIdx.x] = parts[offset + step_id + (size_t)step * t];
+        }
+        __syncthreads();
+
+        for (int lv = 0; lv <= 4; lv++){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.y; t < 16; t += blockDim.y){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = ((seq_id << (4 - lv)) | (idx >> (lv + 1))) * 2;
+                bitrev_seq_id = __brev(-__brev(bitrev_seq_id));
+                uint3 twiddle_factor = mul_mod(
+                    roots_table_lv1[bitrev_seq_id >> 16],
+                    roots_table_lv2[bitrev_seq_id & 0xffff]
+                );
+                uint3 u = local_coefs[idx][threadIdx.x];
+                uint3 v = local_coefs[idx + stride][threadIdx.x];
+                local_coefs[idx][threadIdx.x] = add_mod(u, v);
+                local_coefs[idx + stride][threadIdx.x] = mul_mod(sub_mod(u, v), twiddle_factor);
+            }
+            __syncthreads();
+        }
+
+        for (int t = threadIdx.y; t < 32; t += blockDim.y){
+            parts[offset + step_id + (size_t)step * t] = local_coefs[t][threadIdx.x];
+        }
+        __syncthreads();
+    }
+}
+
 template<int max_local_size>
 __global__ void fft_level_backward_final(
     uint3 * parts, int k, int i,
@@ -1082,7 +1127,7 @@ void batch_mul_ntt(
                 i = k - 1;
             }else{
                 int num_blocks = min(((size_t)N) << (k - 9), (size_t)65536);
-                if (k - i >= 26 || (i != 0 && k - i == 21) ||  (i != 0 && k - i == 16)){
+                if (k >= 26 || (i != 0 && k - i == 21) ||  (i != 0 && k - i == 16)){
                     if (i != 0){
                         fft_level_forward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
                             parts_a, // parts_b must be adjacent to it
@@ -1130,10 +1175,14 @@ void batch_mul_ntt(
         //if (L_a != 33554432){ // 13.631 ms
         //if (L_a != 512 || L_b != 512){ // 4.804 ms
         
+        bool use_path_5 = k >= 24;
+
         for (int i = k - 1; i >= 0; i --){
             if (i == k - 1){
                 int i0 = max(0, i - 11);
-                if (i0 != 0){
+                if (use_path_5){
+                    i0 += (100 - i0) % 5;
+                }else{
                     i0 += (4 - i0) & 3;
                 }
                 int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
@@ -1159,14 +1208,25 @@ void batch_mul_ntt(
                 }
                 i = i0;
             }else{
-                const int threads_per_block = 64;
-                int num_blocks = min(((((size_t)N) << (k - 4)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                fft_level_backward_radix16<<<num_blocks, threads_per_block>>>(
-                    parts_a,
-                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                    N
-                );
-                i -= 3;
+                if (use_path_5){
+                    const int threads_per_block = 32;
+                    int num_blocks = min(((((size_t)N) << (k - 5)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+                    fft_level_backward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
+                        parts_a,
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N
+                    );
+                    i -= 4;
+                }else{
+                    const int threads_per_block = 64;
+                    int num_blocks = min(((((size_t)N) << (k - 4)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+                    fft_level_backward_radix16<<<num_blocks, threads_per_block>>>(
+                        parts_a,
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N
+                    );
+                    i -= 3;
+                }
             }
         }
 
