@@ -506,48 +506,6 @@ __global__ void fft_level_forward_final(
     }
 }
 
-template<int max_local_size>
-__global__ void fft_level_forward_final_initial(
-    uint32_t * A, uint32_t * B,
-    uint3 * parts, int k, 
-    uint3 * roots_table_lv1, uint3 * roots_table_lv2,
-    size_t N, uint32_t L_a, uint32_t L_b
-){
-    uint32_t local_size = 1u << k;
-    uint32_t N_half = N >> 1;
-    __shared__ uint3 local_coefs[max_local_size];
-    for (size_t j = ((size_t)blockIdx.x) << k; j < (N << k); j += gridDim.x << k){
-        uint32_t group = j >> k;
-        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
-            uint32_t idx = t;
-            if (group < N_half){
-                local_coefs[t] = make_uint3((idx < L_a) ? A[(size_t)group * L_a + idx] : 0, 0, 0);
-            }else{
-                local_coefs[t] = make_uint3((idx < L_b) ? B[(size_t)(group - N_half) * L_b + idx] : 0, 0, 0);
-            }
-        }
-        __syncthreads();
-        for (int lv = k - 1; lv >= 0; lv--){
-            uint32_t stride = 1u << lv;
-            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
-                int idx = ((t >> lv) << lv) + t;
-                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
-                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
-                uint3 u = local_coefs[idx];
-                uint3 v = local_coefs[idx + stride];
-                uint3 w = mul_mod(v, twiddle_factor);
-                local_coefs[idx] = add_mod(u, w);
-                local_coefs[idx + stride] = sub_mod(u, w);
-            }
-            __syncthreads();
-        }
-        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
-            parts[j + t] = local_coefs[t];
-        }
-        __syncthreads();
-    }
-}
-
 __global__ void pointwise_mul(uint3 * parts_a, uint3 * parts_b, size_t total, uint3 * scalar_ptr){
     uint3 scalar = scalar_ptr[0];
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < total; j += blockDim.x * gridDim.x){
@@ -1431,57 +1389,28 @@ void batch_mul_ntt(
         uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
         uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
 
-        // copy + pointwise mul time : 5.808 ms
-
-        //if (L_a != 33554432){ // 23.238 ms
-        //if (L_a != 512 || L_b != 512){ // 8.080 ms
-
         for (int i = 0; i < k; i ++){
             if (k - i <= 12){
                 int local_size = 1 << (k - i);
                 int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
                 if (k - i <= 10){
-                    if (i != 0){
-                        fft_level_forward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
-                            parts_a,
-                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2 // we use 2 * N to do parts_a and parts_b
-                        );
-                    }else{
-                        fft_level_forward_final_initial<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
-                            A, B, parts_a,
-                            k, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b
-                        );
-                    }
+                    fft_level_forward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
+                        parts_a,
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N * 2 // we use 2 * N to do parts_a and parts_b
+                    );
                 }else if (k - i == 11){
-                    if (i != 0){
-                        fft_level_forward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
-                            parts_a,
-                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2 // we use 2 * N to do parts_a and parts_b
-                        );
-                    }else{
-                        fft_level_forward_final_initial<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
-                            A, B, parts_a,
-                            k, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b
-                        );
-                    }
+                    fft_level_forward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
+                        parts_a,
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N * 2 // we use 2 * N to do parts_a and parts_b
+                    );
                 }else{
-                    if (i != 0){
-                        fft_level_forward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
-                            parts_a,
-                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2 // we use 2 * N to do parts_a and parts_b
-                        );
-                    }else{
-                        fft_level_forward_final_initial<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
-                            A, B, parts_a,
-                            k, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b
-                        );
-                    }
+                    fft_level_forward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
+                        parts_a,
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N * 2 // we use 2 * N to do parts_a and parts_b
+                    );
                 }
                 i = k - 1;
             }else{
@@ -1522,17 +1451,12 @@ void batch_mul_ntt(
             }
         }
 
-        //}
-
         // fuse divide by K into pointwise mul
         if (true){
             const int threads_per_block = 512;
             int num_blocks = min(((((size_t)N) << k) + threads_per_block - 1) / threads_per_block, (size_t)65536);
             pointwise_mul<<<num_blocks, threads_per_block>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
         }
-
-        //if (L_a != 33554432){ // 13.631 ms
-        //if (L_a != 512 || L_b != 512){ // 4.804 ms
         
         bool use_path_5 = k >= 24;
 
@@ -1589,11 +1513,6 @@ void batch_mul_ntt(
             }
         }
 
-        //}
-
-        //if (L_a != 33554432){ // 1.988ms
-        //if (L_a != 512 || L_b != 512){ // 0.823ms
-
         if (L <= 2048 || N >= 160){
             int threads_per_block = min(L>>1, (size_t)1024);
             int num_blocks = min(N, 65536);
@@ -1612,8 +1531,6 @@ void batch_mul_ntt(
                 ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
             );
         }
-        
-        //}
 
         A += ((size_t)N) * L_a;
         B += ((size_t)N) * L_b;
