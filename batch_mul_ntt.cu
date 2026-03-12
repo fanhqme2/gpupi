@@ -1569,6 +1569,7 @@ __global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, 
         for (int t = threadIdx.x; t < local_size; t += blockDim.x){
             local_coefs_a[t] = make_uint3((t < L_a) ? A[t] : 0, 0, 0);
         }
+        __syncthreads();
         for (int lv = k - 1; lv >= 0; lv--){
             uint32_t stride = 1u << lv;
             for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
@@ -1590,6 +1591,7 @@ __global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, 
         for (int t = threadIdx.x; t < local_size; t += blockDim.x){
             local_coefs_a[t] = make_uint3((t < L_b) ? B[t] : 0, 0, 0);
         }
+        __syncthreads();
         for (int lv = k - 1; lv >= 0; lv--){
             uint32_t stride = 1u << lv;
             for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
