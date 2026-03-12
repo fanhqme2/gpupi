@@ -1050,9 +1050,330 @@ __global__ void add3_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N,
     }
 }
 
+template<int max_local_size>
+__global__ void mul_fft_local(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 * roots_table_lv2, uint3 * inv2n, uint32_t N, uint32_t L_a, uint32_t L_b, int k){
+    __shared__ uint3 local_coefs_a[max_local_size], local_coefs_b[max_local_size];
+    //__shared__ ushort2 carry_prop[32];
+    ushort2 * carry_prop = (ushort2 *)local_coefs_b;
+    uint32_t local_size = 1u << k;
+    size_t L = L_a + L_b;
+    uint3 inv2n_val = inv2n[0];
+    A += ((size_t)blockIdx.x) * L_a;
+    B += ((size_t)blockIdx.x) * L_b;
+    ret += ((size_t)blockIdx.x) * L;
+    for (uint32_t j = blockIdx.x; j < N; j += gridDim.x){
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs_a[t] = make_uint3((t < L_a) ? A[t] : 0, 0, 0);
+            local_coefs_b[t] = make_uint3((t < L_b) ? B[t] : 0, 0, 0);
+        }
+        __syncthreads();
+        for (int lv = k - 1; lv >= 0; lv--){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                uint3 u_a = local_coefs_a[idx];
+                uint3 v_a = local_coefs_a[idx + stride];
+                uint3 w_a = mul_mod(v_a, twiddle_factor);
+                local_coefs_a[idx] = add_mod(u_a, w_a);
+                local_coefs_a[idx + stride] = sub_mod(u_a, w_a);
+
+                uint3 u_b = local_coefs_b[idx];
+                uint3 v_b = local_coefs_b[idx + stride];
+                uint3 w_b = mul_mod(v_b, twiddle_factor);
+                local_coefs_b[idx] = add_mod(u_b, w_b);
+                local_coefs_b[idx + stride] = sub_mod(u_b, w_b);
+            }
+            __syncthreads();
+        }
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs_a[t] = mul_mod(mul_mod(local_coefs_a[t], local_coefs_b[t]), inv2n_val);
+        }
+        __syncthreads();
+        for (int lv = 0; lv < k; lv++){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
+                bitrev_seq_id = __brev(-__brev(bitrev_seq_id));
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                uint3 u = local_coefs_a[idx];
+                uint3 v = local_coefs_a[idx + stride];
+                local_coefs_a[idx] = add_mod(u, v);
+                local_coefs_a[idx + stride] = mul_mod(sub_mod(u, v), twiddle_factor);
+            }
+            __syncthreads();
+        }
+        uint32_t r0_value, r1_value;
+        uint32_t c0_value, c1_value;
+        uint32_t t0_value, t1_value;
+        uint32_t block_carry = 0;
+        for (int t = threadIdx.x * 2; t < local_size; t += blockDim.x * 2){
+            r0_value = local_coefs_a[t].x;
+            r1_value = local_coefs_a[t + 1].x;
+            c0_value = (t == 0) ? 0 : local_coefs_a[t - 1].y;
+            c1_value = local_coefs_a[t].y;
+            t0_value = (t <= 1) ? 0 : local_coefs_a[t - 2].z;
+            t1_value = (t == 0) ? 0 : local_coefs_a[t - 1].z;
+            ushort2 carry;
+
+            r0_value = add_cc(r0_value, c0_value);
+            r1_value = addc_cc(r1_value, c1_value);
+            carry.x = addc(0, 0);
+            r0_value = add_cc(r0_value, t0_value);
+            r1_value = addc_cc(r1_value, t1_value);
+            carry.x += addc(0, 0);
+            add_cc(r0_value, 2);
+            addc_cc(r1_value, 0);
+            if (addc(0, 0)){
+                carry.y = r0_value & 3;
+            }else{
+                carry.y = 0;
+            }
+            for (int delta = 1; delta < 32; delta *= 2){
+                ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
+                if ((threadIdx.x & 31) >= delta){
+                    ushort compound = carry.y + carry_prev.x;
+                    carry.x += compound >> 2;
+                    if ((compound & 3) == 3){
+                        carry.y = carry_prev.y;
+                    }else{
+                        carry.y = 0;
+                    }
+                }
+            }
+            if ((threadIdx.x & 31) == 32 - 1){
+                carry_prop[threadIdx.x >> 5] = carry;
+            }
+            __syncthreads();
+
+            if (threadIdx.x < 32){
+                ushort2 bc = carry_prop[threadIdx.x];
+                for (int delta = 1; delta < blockDim.x >> 5; delta *= 2){
+                    ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(bc, delta);
+                    if (threadIdx.x >= delta){
+                        ushort compound = bc.y + carry_prev.x;
+                        bc.x += compound >> 2;
+                        if ((compound & 3) == 3){
+                            bc.y = carry_prev.y;
+                        }else{
+                            bc.y = 0;
+                        }
+                    }
+                }
+                ushort compound = bc.y + block_carry;
+                bc.x += compound >> 2;
+                bc.y = 0;
+                carry_prop[threadIdx.x] = bc;
+            }
+            __syncthreads();
+
+            ushort compound = carry.y + ((threadIdx.x >= 32) ? carry_prop[(threadIdx.x >> 5) - 1].x : block_carry);
+            carry.x += compound >> 2;
+            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
+            if ((threadIdx.x & 31) == 0){
+                if (threadIdx.x == 0){
+                    carry.x = block_carry;
+                }else{
+                    carry.x = carry_prop[(threadIdx.x >> 5) - 1].x;
+                }
+            }
+            r0_value = add_cc(r0_value, (uint32_t)carry.x);
+            r1_value = addc_cc(r1_value, 0);
+
+            if (t < L){
+                ret[t] = r0_value;
+            }
+            if (t + 1 < L){
+                ret[t + 1] = r1_value;
+            }
+            block_carry = carry_prop[(blockDim.x >> 5) - 1].x;
+            __syncthreads();
+        }
+
+        A += ((size_t)gridDim.x) * L_a;
+        B += ((size_t)gridDim.x) * L_b;
+        ret += ((size_t)gridDim.x) * L;
+    }
+}
+
+template<int max_local_size>
+__global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 * workspace, uint3 * roots_table_lv2, uint3 * inv2n, uint32_t N, uint32_t L_a, uint32_t L_b, int k){
+    __shared__ uint3 local_coefs_a[max_local_size];
+    ushort2 * carry_prop = (ushort2 *)local_coefs_a;
+    uint32_t local_size = 1u << k;
+    size_t L = L_a + L_b;
+    uint3 inv2n_val = inv2n[0];
+    A += ((size_t)blockIdx.x) * L_a;
+    B += ((size_t)blockIdx.x) * L_b;
+    ret += ((size_t)blockIdx.x) * L;
+    workspace += ((size_t)blockIdx.x) * local_size;
+    for (uint32_t j = blockIdx.x; j < N; j += gridDim.x){
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs_a[t] = make_uint3((t < L_a) ? A[t] : 0, 0, 0);
+        }
+        for (int lv = k - 1; lv >= 0; lv--){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                uint3 u_a = local_coefs_a[idx];
+                uint3 v_a = local_coefs_a[idx + stride];
+                uint3 w_a = mul_mod(v_a, twiddle_factor);
+                local_coefs_a[idx] = add_mod(u_a, w_a);
+                local_coefs_a[idx + stride] = sub_mod(u_a, w_a);
+            }
+            __syncthreads();
+        }
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            workspace[t] = local_coefs_a[t];
+        }
+        __syncthreads();
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs_a[t] = make_uint3((t < L_b) ? B[t] : 0, 0, 0);
+        }
+        for (int lv = k - 1; lv >= 0; lv--){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                uint3 u_a = local_coefs_a[idx];
+                uint3 v_a = local_coefs_a[idx + stride];
+                uint3 w_a = mul_mod(v_a, twiddle_factor);
+                local_coefs_a[idx] = add_mod(u_a, w_a);
+                local_coefs_a[idx + stride] = sub_mod(u_a, w_a);
+            }
+            __syncthreads();
+        }
+        __syncthreads();
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            local_coefs_a[t] = mul_mod(mul_mod(local_coefs_a[t], workspace[t]), inv2n_val);
+        }
+        __syncthreads();
+        for (int lv = 0; lv < k; lv++){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size >> 1; t += blockDim.x){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = (idx >> (lv + 1)) * 2;
+                bitrev_seq_id = __brev(-__brev(bitrev_seq_id));
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                uint3 u = local_coefs_a[idx];
+                uint3 v = local_coefs_a[idx + stride];
+                local_coefs_a[idx] = add_mod(u, v);
+                local_coefs_a[idx + stride] = mul_mod(sub_mod(u, v), twiddle_factor);
+            }
+            __syncthreads();
+        }
+        uint32_t r0_value, r1_value;
+        uint32_t c0_value, c1_value;
+        uint32_t t0_value, t1_value;
+        uint32_t block_carry = 0;
+        for (int t = threadIdx.x * 2; t < local_size; t += blockDim.x * 2){
+            r0_value = local_coefs_a[t].x;
+            r1_value = local_coefs_a[t + 1].x;
+            c0_value = (t == 0) ? 0 : local_coefs_a[t - 1].y;
+            c1_value = local_coefs_a[t].y;
+            t0_value = (t <= 1) ? 0 : local_coefs_a[t - 2].z;
+            t1_value = (t == 0) ? 0 : local_coefs_a[t - 1].z;
+            ushort2 carry;
+
+            r0_value = add_cc(r0_value, c0_value);
+            r1_value = addc_cc(r1_value, c1_value);
+            carry.x = addc(0, 0);
+            r0_value = add_cc(r0_value, t0_value);
+            r1_value = addc_cc(r1_value, t1_value);
+            carry.x += addc(0, 0);
+            add_cc(r0_value, 2);
+            addc_cc(r1_value, 0);
+            if (addc(0, 0)){
+                carry.y = r0_value & 3;
+            }else{
+                carry.y = 0;
+            }
+            for (int delta = 1; delta < 32; delta *= 2){
+                ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
+                if ((threadIdx.x & 31) >= delta){
+                    ushort compound = carry.y + carry_prev.x;
+                    carry.x += compound >> 2;
+                    if ((compound & 3) == 3){
+                        carry.y = carry_prev.y;
+                    }else{
+                        carry.y = 0;
+                    }
+                }
+            }
+            if ((threadIdx.x & 31) == 32 - 1){
+                carry_prop[threadIdx.x >> 5] = carry;
+            }
+            __syncthreads();
+
+            if (threadIdx.x < 32){
+                ushort2 bc = carry_prop[threadIdx.x];
+                for (int delta = 1; delta < blockDim.x >> 5; delta *= 2){
+                    ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(bc, delta);
+                    if (threadIdx.x >= delta){
+                        ushort compound = bc.y + carry_prev.x;
+                        bc.x += compound >> 2;
+                        if ((compound & 3) == 3){
+                            bc.y = carry_prev.y;
+                        }else{
+                            bc.y = 0;
+                        }
+                    }
+                }
+                ushort compound = bc.y + block_carry;
+                bc.x += compound >> 2;
+                bc.y = 0;
+                carry_prop[threadIdx.x] = bc;
+            }
+            __syncthreads();
+
+            ushort compound = carry.y + ((threadIdx.x >= 32) ? carry_prop[(threadIdx.x >> 5) - 1].x : block_carry);
+            carry.x += compound >> 2;
+            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
+            if ((threadIdx.x & 31) == 0){
+                if (threadIdx.x == 0){
+                    carry.x = block_carry;
+                }else{
+                    carry.x = carry_prop[(threadIdx.x >> 5) - 1].x;
+                }
+            }
+            r0_value = add_cc(r0_value, (uint32_t)carry.x);
+            r1_value = addc_cc(r1_value, 0);
+
+            if (t < L){
+                ret[t] = r0_value;
+            }
+            if (t + 1 < L){
+                ret[t + 1] = r1_value;
+            }
+            block_carry = carry_prop[(blockDim.x >> 5) - 1].x;
+            __syncthreads();
+        }
+
+        A += ((size_t)gridDim.x) * L_a;
+        B += ((size_t)gridDim.x) * L_b;
+        ret += ((size_t)gridDim.x) * L;
+    }
+}
+
 static uint32_t get_N_max(uint32_t N, uint32_t L_a, uint32_t L_b){
     size_t L = (size_t)L_a + (size_t)L_b;
-    uint32_t cache_limit = max(4000000 / L, (size_t) 1);
+    size_t K = 1;
+    while (K < L){
+        K <<= 1;
+    }
+    if (K <= 2048){
+        return N;
+    }
+    uint32_t cache_limit = max(4000000 / K, (size_t) 1);
+    if (K == 4096){
+        cache_limit = 8000000 / K;
+    }
+    
     if (N >= cache_limit){
         N = cache_limit;
     }
@@ -1077,7 +1398,33 @@ void batch_mul_ntt(
         k++;
     }
 
+    if (k <= 9){
+        mul_fft_local<512><<<min(N_total, 65536), max(1, (1 << k) >> 1)>>>(
+            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+        );
+        return;
+    }
+    if (k == 10){
+        mul_fft_local<1024><<<min(N_total, 65536), 256>>>(
+            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+        );
+        return;
+    }
+    if (k == 11){
+        mul_fft_local<2048><<<min(N_total, 65536), 512>>>(
+            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+        );
+        return;
+    }
+
     uint32_t N_batch = get_N_max(N_total, L_a, L_b);
+
+    if (k == 12){
+        mul_fft_local_spill<4096><<<N_batch, 512>>>(
+            A, B, ret, reinterpret_cast<uint3 *>(workspace), tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+        );
+        return;
+    }
 
     for (uint32_t ni = 0; ni < N_total; ni += N_batch){
         uint32_t N = min(N_total - ni, N_batch);
@@ -1280,7 +1627,13 @@ size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L_a, uint32_t L_b){
     while (K < L){
         K <<= 1;
     }
+    if (K <= 2048){
+        return 0;
+    }
     // parts_a + parts_b, each is N*K uint3 values
     uint32_t N_batch = get_N_max(N, L_a, L_b);
+    if (K == 4096){
+        return N_batch * K * sizeof(uint3);
+    }
     return N_batch * K * 2 * sizeof(uint3);
 }

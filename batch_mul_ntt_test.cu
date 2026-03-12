@@ -542,7 +542,7 @@ int main() {
     if (!all_passed) goto done;
 
     printf("=== Benchmark Tests ===\n\n");
-    for (uint32_t e = 9; e <= 26; ++e) {
+    for (uint32_t e = 8; e <= 26; ++e) {
         
         uint32_t L_a = 1u << e;
         uint32_t L_b = L_a;
