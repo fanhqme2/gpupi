@@ -1032,106 +1032,7 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
     }
 }
 
-__global__ void add3_reduce_blocks(uint3 * parts, uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
-    __shared__ ushort2 carryInfo[32];
-    parts += ((size_t)blockIdx.y) << k;
-    ret += ((size_t)blockIdx.y) * L;
-    const int block_size = 2048;
-    uint32_t blocks_per_num = (L + block_size - 1) / block_size;
-    ret_carry += ((size_t)blockIdx.y) * blocks_per_num;
-    for (int idx = blockIdx.y; idx < N; idx += gridDim.y){
-        for (size_t i0 = blockIdx.x * block_size; i0 < L; i0 += block_size * gridDim.x){
-            uint32_t i = i0 + (threadIdx.y * 32 + threadIdx.x) * 2;
-            uint32_t r0_value, r1_value;
-            uint32_t c0_value, c1_value;
-            uint32_t t0_value, t1_value;
-            r0_value = parts[i].x;
-            r1_value = parts[i + 1].x;
-            c0_value = (i == 0) ? 0 : parts[i - 1].y;
-            c1_value = parts[i].y;
-            t0_value = (i <= 1) ? 0 : parts[i - 2].z;
-            t1_value = (i == 0) ? 0 : parts[i - 1].z;
-            ushort2 carry;
-
-            r0_value = add_cc(r0_value, c0_value);
-            r1_value = addc_cc(r1_value, c1_value);
-            carry.x = addc(0, 0);
-            r0_value = add_cc(r0_value, t0_value);
-            r1_value = addc_cc(r1_value, t1_value);
-            carry.x += addc(0, 0);
-            add_cc(r0_value, 2);
-            addc_cc(r1_value, 0);
-            if (addc(0, 0)){
-                carry.y = r0_value & 3;
-            }else{
-                carry.y = 0;
-            }
-            for (int delta = 1; delta < 32; delta *= 2){
-                ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
-                if (threadIdx.x >= delta){
-                    ushort compound = carry.y + carry_prev.x;
-                    carry.x += compound >> 2;
-                    if ((compound & 3) == 3){
-                        carry.y = carry_prev.y;
-                    }else{
-                        carry.y = 0;
-                    }
-                }
-            }
-            if (threadIdx.x == 32 - 1){
-                carryInfo[threadIdx.y] = carry;
-            }
-            __syncthreads();
-
-            if (threadIdx.y == 0){
-                ushort2 bc = carryInfo[threadIdx.x];
-                for (int delta = 1; delta < blockDim.y; delta *= 2){
-                    ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(bc, delta);
-                    if (threadIdx.x >= delta){
-                        ushort compound = bc.y + carry_prev.x;
-                        bc.x += compound >> 2;
-                        if ((compound & 3) == 3){
-                            bc.y = carry_prev.y;
-                        }else{
-                            bc.y = 0;
-                        }
-                    }
-                }
-                if (threadIdx.x == 31){
-                    ret_carry[i0 / block_size] = bc;
-                }
-                bc.y = 0;
-                carryInfo[threadIdx.x] = bc;
-            }
-            __syncthreads();
-
-            ushort compound = carry.y + ((threadIdx.y > 0) ? carryInfo[threadIdx.y - 1].x : 0);
-            carry.x += compound >> 2;
-            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
-            if (threadIdx.x == 0){
-                if (threadIdx.y == 0){
-                    carry.x = 0;
-                }else{
-                    carry.x = carryInfo[threadIdx.y - 1].x;
-                }
-            }
-            r0_value = add_cc(r0_value, (uint32_t)carry.x);
-            r1_value = addc_cc(r1_value, 0);
-
-            if (i < L){
-                ret[i] = r0_value;
-            }
-            if (i + 1 < L){
-                ret[i + 1] = r1_value;
-            }
-            __syncthreads();
-        }
-        parts += ((size_t)gridDim.y) << k;
-        ret += ((size_t)L) * gridDim.y;
-        ret_carry += blocks_per_num * gridDim.y;
-    }
-}
-__global__ void add3_combine_blocks(ushort2 * ret_carry, uint32_t N, uint32_t L){
+__global__ void add2_combine_blocks(ushort2 * ret_carry, uint32_t N, uint32_t L){
     __shared__ ushort2 carryInfo[32];
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
@@ -1197,7 +1098,7 @@ __global__ void add3_combine_blocks(ushort2 * ret_carry, uint32_t N, uint32_t L)
     }
 }
 
-__global__ void add3_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
+__global__ void add2_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
     __shared__ uint32_t carryInfo[32];
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
@@ -1911,7 +1812,7 @@ void batch_mul_ntt(
                 }else{
                     const int threads_per_block = 64;
                     int num_blocks = min(((((size_t)N) << (k - 4)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                    if (i - 3 != 0 || L == 8192){
+                    if (i - 3 != 0 || K == 8192){
                         fft_level_backward_radix16<<<num_blocks, threads_per_block>>>(
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
@@ -1929,27 +1830,12 @@ void batch_mul_ntt(
             }
         }
 
-        if (!use_path_5 && L == 8192){
-            if (L <= 8192 || N >= 85){
-                int threads_per_block = min(L>>1, (size_t)1024);
-                int num_blocks = min(N, 65536);
-                add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
-            }else{
-                const int block_size = 2048;
-                int num_blocks_x = min((size_t)256, max((size_t)1, (L + block_size - 1) / block_size));
-                int num_blocks_y = min(N, 65536 / num_blocks_x);
-                add3_reduce_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
-                    parts_a, ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
-                );
-                add3_combine_blocks<<<min(N, 65536), dim3(32, 32, 1)>>>(
-                    reinterpret_cast<ushort2 *>(parts_b), N, L
-                );
-                add3_apply_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
-                    ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
-                );
-            }
+        if (K == 8192){
+            int threads_per_block = min(L>>1, (size_t)1024);
+            int num_blocks = min(N, 65536);
+            add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
         }else{
-            if (L <= 8192 || N >= 85){
+            if (N >= 85){
                 int threads_per_block = min(L>>1, (size_t)1024);
                 int num_blocks = min(N, 65536);
                 add2_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(
@@ -1963,10 +1849,10 @@ void batch_mul_ntt(
                 add2_reduce_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
                     ret, reinterpret_cast<uint32_t *>(parts_b), reinterpret_cast<ushort2 *>(parts_a), N, k, L
                 );
-                add3_combine_blocks<<<min(N, 65536), dim3(32, 32, 1)>>>(
+                add2_combine_blocks<<<min(N, 65536), dim3(32, 32, 1)>>>(
                     reinterpret_cast<ushort2 *>(parts_a), N, L
                 );
-                add3_apply_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
+                add2_apply_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
                     ret, reinterpret_cast<ushort2 *>(parts_a), N, k, L
                 );
             }
