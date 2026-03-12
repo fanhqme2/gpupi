@@ -809,15 +809,26 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
     }
 }
 
+__device__ __forceinline__ ushort2 combine_carry(ushort2 a, ushort2 b){
+    ushort compound = a.y + b.x;
+    a.x += compound >> 2;
+    if ((compound & 3) == 3){
+        a.y = b.y;
+    }else{
+        a.y = 0;
+    }
+    return a;
+}
+
 __global__ void add3_reduce_blocks(uint3 * parts, uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
     __shared__ ushort2 carryInfo[32];
-    parts += ((size_t)blockIdx.x) << k;
-    ret += ((size_t)blockIdx.x) * L;
+    parts += ((size_t)blockIdx.y) << k;
+    ret += ((size_t)blockIdx.y) * L;
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
-    ret_carry += ((size_t)blockIdx.x) * blocks_per_num;
-    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
-        for (size_t i0 = blockIdx.y * block_size; i0 < L; i0 += block_size * gridDim.y){
+    ret_carry += ((size_t)blockIdx.y) * blocks_per_num;
+    for (int idx = blockIdx.y; idx < N; idx += gridDim.y){
+        for (size_t i0 = blockIdx.x * block_size; i0 < L; i0 += block_size * gridDim.x){
             uint32_t i = i0 + (threadIdx.y * 32 + threadIdx.x) * 2;
             uint32_t r0_value, r1_value;
             uint32_t c0_value, c1_value;
@@ -903,9 +914,9 @@ __global__ void add3_reduce_blocks(uint3 * parts, uint32_t * ret, ushort2 * ret_
             }
             __syncthreads();
         }
-        parts += ((size_t)gridDim.x) << k;
-        ret += ((size_t)L) * gridDim.x;
-        ret_carry += blocks_per_num * gridDim.x;
+        parts += ((size_t)gridDim.y) << k;
+        ret += ((size_t)L) * gridDim.y;
+        ret_carry += blocks_per_num * gridDim.y;
     }
 }
 __global__ void add3_combine_blocks(ushort2 * ret_carry, uint32_t N, uint32_t L){
@@ -978,10 +989,10 @@ __global__ void add3_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N,
     __shared__ uint32_t carryInfo[32];
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
-    ret_carry += ((size_t)blockIdx.x) * blocks_per_num;
-    ret += ((size_t)blockIdx.x) * L;
-    for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
-        for (size_t i0 = blockIdx.y * block_size; i0 < L; i0 += block_size * gridDim.y){       
+    ret_carry += ((size_t)blockIdx.y) * blocks_per_num;
+    ret += ((size_t)blockIdx.y) * L;
+    for (int idx = blockIdx.y; idx < N; idx += gridDim.y){
+        for (size_t i0 = blockIdx.x * block_size; i0 < L; i0 += block_size * gridDim.x){       
             uint32_t block_carry = ret_carry[i0 / block_size].x;     
             if (block_carry){
                 uint32_t i = i0 + (threadIdx.y * 32 + threadIdx.x) * 2;
@@ -1003,8 +1014,8 @@ __global__ void add3_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N,
                 __syncthreads();
             }
         }
-        ret_carry += blocks_per_num * gridDim.x;
-        ret += ((size_t)L) * gridDim.x;
+        ret_carry += blocks_per_num * gridDim.y;
+        ret += ((size_t)L) * gridDim.y;
     }
 }
 
@@ -1519,8 +1530,8 @@ void batch_mul_ntt(
             add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
         }else{
             const int block_size = 2048;
-            int num_blocks_y = min((size_t)256, max((size_t)1, (L + block_size - 1) / block_size));
-            int num_blocks_x = min(N, 65536 / num_blocks_y);
+            int num_blocks_x = min((size_t)256, max((size_t)1, (L + block_size - 1) / block_size));
+            int num_blocks_y = min(N, 65536 / num_blocks_x);
             add3_reduce_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
                 parts_a, ret, reinterpret_cast<ushort2 *>(parts_b), N, k, L
             );
