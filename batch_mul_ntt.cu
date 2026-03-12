@@ -1263,7 +1263,7 @@ __global__ void add2_reduce_blocks(uint32_t * ret, uint32_t * workspace, ushort2
             for (int delta = 1; delta < 32; delta *= 2){
                 ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
                 if (threadIdx.x >= delta){
-                    carry_prev = combine_carry(carry, carry_prev);
+                    carry = combine_carry(carry, carry_prev);
                 }
             }
             if (threadIdx.x == 32 - 1){
