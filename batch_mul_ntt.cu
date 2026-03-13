@@ -272,7 +272,7 @@ __global__ void fft_level_forward_radix16(
 __global__ void fft_level_forward_radix16_initial(
     uint32_t * A, uint32_t * B, uint3 * parts, int k, int i,
     uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N, uint32_t L_a, uint32_t L_b
+    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B
 ){
     const uint32_t step = 1u << (k - 4 - i);
     size_t N_half = N >> 1;
@@ -306,11 +306,11 @@ __global__ void fft_level_forward_radix16_initial(
         #pragma unroll
         for (int t = 0; t < 16; t++){
             if (group < N_half){
-                size_t offset_input = group * L_a;
+                size_t offset_input = group * stride_A;
                 uint32_t idx = step_id + (size_t)step * t;
                 x[t] = make_uint3(idx < L_a ? A[offset_input + idx] : 0, 0, 0);
             }else{
-                size_t offset_input = (group - N_half) * L_b;
+                size_t offset_input = (group - N_half) * stride_B;
                 uint32_t idx = step_id + (size_t)step * t;
                 x[t] = make_uint3(idx < L_b ? B[offset_input + idx] : 0, 0, 0);
             }
@@ -412,7 +412,7 @@ __global__ void fft_level_forward_radix32(
 __global__ void fft_level_forward_radix32_initial(
     uint32_t * A, uint32_t * B, uint3 *parts, int k, int i,
     uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N, uint32_t L_a, uint32_t L_b
+    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B
 ){
     __shared__ uint3 local_coefs[32][32];
     const uint32_t step = 1u << (k - 5 - i);
@@ -425,11 +425,11 @@ __global__ void fft_level_forward_radix32_initial(
         uint32_t step_id = (uint32_t)(j & (step - 1));
         for (int t = threadIdx.y; t < 32; t += blockDim.y){
             if (group < N_half){
-                size_t offset_input = group * L_a;
+                size_t offset_input = group * stride_A;
                 uint32_t idx = step_id + (size_t)step * t;
                 local_coefs[t][threadIdx.x] = make_uint3(idx < L_a ? A[offset_input + idx] : 0, 0, 0);
             }else{
-                size_t offset_input = (group - N_half) * L_b;
+                size_t offset_input = (group - N_half) * stride_B;
                 uint32_t idx = step_id + (size_t)step * t;
                 local_coefs[t][threadIdx.x] = make_uint3(idx < L_b ? B[offset_input + idx] : 0, 0, 0);
             }
@@ -680,7 +680,7 @@ __global__ void fft_level_backward_radix32_initial(
     uint3 *parts, int k,
     uint32_t * ret, uint32_t * workspace,
     uint3 *roots_table_lv2,
-    size_t N, size_t L
+    size_t N, size_t L, uint32_t stride_ret
 ){
     __shared__ uint3 local_coefs[32][32];
     uint32_t step = 1u << (k - 5);
@@ -738,7 +738,7 @@ __global__ void fft_level_backward_radix32_initial(
             r0_value += prev_carry.x;
             uint32_t idx = step_id + (size_t)step * t;
             if (idx < L){
-                ret[group * L + idx] = r0_value;
+                ret[(size_t)group * stride_ret + idx] = r0_value;
             }
             if (threadIdx.x == 31){
                 r0_value = local_coefs[t][31].y;
@@ -759,7 +759,7 @@ __global__ void fft_level_backward_radix16_initial(
     uint3 *parts, int k,
     uint32_t * ret, uint32_t * workspace,
     uint3 *roots_table_lv2,
-    size_t N, size_t L
+    size_t N, size_t L, uint32_t stride_ret
 ){
     uint32_t step = 1u << (k - 4);
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 4)); j += blockDim.x * gridDim.x){
@@ -875,7 +875,7 @@ __global__ void fft_level_backward_radix16_initial(
             r0_value += prev_carry.x;
             uint32_t idx = step_id + (size_t)step * t;
             if (idx < L){
-                ret[group * L + idx] = r0_value;
+                ret[(size_t)group * stride_ret + idx] = r0_value;
             }
             if ((threadIdx.x & 31) == 31){
                 r0_value = dt.y;
@@ -935,10 +935,10 @@ __global__ void fft_level_backward_final(
     }
 }
 
-__global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k, size_t L){
+__global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k, size_t L, uint32_t stride_ret){
     __shared__ ushort2 carryInfo[32];
     parts += ((size_t)blockIdx.x) << k;
-    ret += ((size_t)blockIdx.x) * L;
+    ret += ((size_t)blockIdx.x) * stride_ret;
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
         ushort block_carry = 0;
         for (size_t i0 = 0; i0 < L; i0 += blockDim.x * blockDim.y * 2){
@@ -1028,7 +1028,7 @@ __global__ void add3_single_block(uint3 * parts, uint32_t * ret, size_t N, int k
             __syncthreads();
         }
         parts += ((size_t)gridDim.x) << k;
-        ret += ((size_t)L) * gridDim.x;
+        ret += ((size_t)stride_ret) * gridDim.x;
     }
 }
 
@@ -1098,12 +1098,12 @@ __global__ void add2_combine_blocks(ushort2 * ret_carry, uint32_t N, uint32_t L)
     }
 }
 
-__global__ void add2_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L){
+__global__ void add2_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N, int k, size_t L, uint32_t stride_ret){
     __shared__ uint32_t carryInfo[32];
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
     ret_carry += ((size_t)blockIdx.y) * blocks_per_num;
-    ret += ((size_t)blockIdx.y) * L;
+    ret += ((size_t)blockIdx.y) * stride_ret;
     for (int idx = blockIdx.y; idx < N; idx += gridDim.y){
         for (size_t i0 = blockIdx.x * block_size; i0 < L; i0 += block_size * gridDim.x){       
             uint32_t block_carry = ret_carry[i0 / block_size].x;     
@@ -1128,13 +1128,13 @@ __global__ void add2_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N,
             }
         }
         ret_carry += blocks_per_num * gridDim.y;
-        ret += ((size_t)L) * gridDim.y;
+        ret += ((size_t)stride_ret) * gridDim.y;
     }
 }
 
-__global__ void add2_reduce_blocks(uint32_t * ret, uint32_t * workspace, ushort2 * ret_carry, size_t N, int k, size_t L){
+__global__ void add2_reduce_blocks(uint32_t * ret, uint32_t * workspace, ushort2 * ret_carry, size_t N, int k, size_t L, uint32_t stride_ret){
     __shared__ ushort2 carryInfo[32];
-    ret += ((size_t)blockIdx.y) * L;
+    ret += ((size_t)blockIdx.y) * stride_ret;
     const int block_size = 2048;
     uint32_t blocks_per_num = (L + block_size - 1) / block_size;
     ret_carry += ((size_t)blockIdx.y) * blocks_per_num;
@@ -1209,15 +1209,15 @@ __global__ void add2_reduce_blocks(uint32_t * ret, uint32_t * workspace, ushort2
             }
             __syncthreads();
         }
-        ret += ((size_t)L) * gridDim.y;
+        ret += ((size_t)stride_ret) * gridDim.y;
         ret_carry += blocks_per_num * gridDim.y;
         workspace += gridDim.y << (k - 4);
     }
 }
 
-__global__ void add2_single_block(uint32_t * ret, uint32_t * workspace, size_t N, int k, size_t L){
+__global__ void add2_single_block(uint32_t * ret, uint32_t * workspace, size_t N, int k, size_t L, uint32_t stride_ret){
     __shared__ ushort2 carryInfo[32];
-    ret += ((size_t)blockIdx.x) * L;
+    ret += ((size_t)blockIdx.x) * stride_ret;
     workspace += ((size_t)blockIdx.x) << (k - 4);
     for (int idx = blockIdx.x; idx < N; idx += gridDim.x){
         ushort block_carry = 0;
@@ -1302,22 +1302,22 @@ __global__ void add2_single_block(uint32_t * ret, uint32_t * workspace, size_t N
             block_carry = carryInfo[31].x;
             __syncthreads();
         }
-        ret += ((size_t)L) * gridDim.x;
+        ret += ((size_t)stride_ret) * gridDim.x;
         workspace += gridDim.x << (k - 4);
     }
 }
 
 template<int max_local_size>
-__global__ void mul_fft_local(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 * roots_table_lv2, uint3 * inv2n, uint32_t N, uint32_t L_a, uint32_t L_b, int k){
+__global__ void mul_fft_local(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 * roots_table_lv2, uint3 * inv2n, uint32_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B, uint32_t stride_ret, int k){
     __shared__ uint3 local_coefs_a[max_local_size], local_coefs_b[max_local_size];
     //__shared__ ushort2 carry_prop[32];
     ushort2 * carry_prop = (ushort2 *)local_coefs_b;
     uint32_t local_size = 1u << k;
     size_t L = L_a + L_b;
     uint3 inv2n_val = inv2n[0];
-    A += ((size_t)blockIdx.x) * L_a;
-    B += ((size_t)blockIdx.x) * L_b;
-    ret += ((size_t)blockIdx.x) * L;
+    A += ((size_t)blockIdx.x) * stride_A;
+    B += ((size_t)blockIdx.x) * stride_B;
+    ret += ((size_t)blockIdx.x) * stride_ret;
     for (uint32_t j = blockIdx.x; j < N; j += gridDim.x){
         for (int t = threadIdx.x; t < local_size; t += blockDim.x){
             local_coefs_a[t] = make_uint3((t < L_a) ? A[t] : 0, 0, 0);
@@ -1449,22 +1449,22 @@ __global__ void mul_fft_local(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 
             __syncthreads();
         }
 
-        A += ((size_t)gridDim.x) * L_a;
-        B += ((size_t)gridDim.x) * L_b;
-        ret += ((size_t)gridDim.x) * L;
+        A += ((size_t)gridDim.x) * stride_A;
+        B += ((size_t)gridDim.x) * stride_B;
+        ret += ((size_t)gridDim.x) * stride_ret;
     }
 }
 
 template<int max_local_size>
-__global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 * workspace, uint3 * roots_table_lv2, uint3 * inv2n, uint32_t N, uint32_t L_a, uint32_t L_b, int k){
+__global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 * workspace, uint3 * roots_table_lv2, uint3 * inv2n, uint32_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B, uint32_t stride_ret, int k){
     __shared__ uint3 local_coefs_a[max_local_size];
     ushort2 * carry_prop = (ushort2 *)local_coefs_a;
     uint32_t local_size = 1u << k;
     size_t L = L_a + L_b;
     uint3 inv2n_val = inv2n[0];
-    A += ((size_t)blockIdx.x) * L_a;
-    B += ((size_t)blockIdx.x) * L_b;
-    ret += ((size_t)blockIdx.x) * L;
+    A += ((size_t)blockIdx.x) * stride_A;
+    B += ((size_t)blockIdx.x) * stride_B;
+    ret += ((size_t)blockIdx.x) * stride_ret;
     workspace += ((size_t)blockIdx.x) * local_size;
     for (uint32_t j = blockIdx.x; j < N; j += gridDim.x){
         for (int t = threadIdx.x; t < local_size; t += blockDim.x){
@@ -1613,9 +1613,9 @@ __global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, 
             __syncthreads();
         }
 
-        A += ((size_t)gridDim.x) * L_a;
-        B += ((size_t)gridDim.x) * L_b;
-        ret += ((size_t)gridDim.x) * L;
+        A += ((size_t)gridDim.x) * stride_A;
+        B += ((size_t)gridDim.x) * stride_B;
+        ret += ((size_t)gridDim.x) * stride_ret;
     }
 }
 
@@ -1647,7 +1647,10 @@ void batch_mul_ntt(
     NTTPrecomputedTables tables,
     uint32_t N_total,
     uint32_t L_a,
-    uint32_t L_b
+    uint32_t L_b,
+    uint32_t stride_A,
+    uint32_t stride_B,
+    uint32_t stride_ret
 ){
     size_t L = ((size_t)L_a) + L_b;
     size_t K = 1;
@@ -1659,19 +1662,19 @@ void batch_mul_ntt(
 
     if (k <= 9){
         mul_fft_local<512><<<min(N_total, 65536), max(1, (1 << k) >> 1)>>>(
-            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, stride_A, stride_B, stride_ret, k
         );
         return;
     }
     if (k == 10){
         mul_fft_local<1024><<<min(N_total, 65536), 256>>>(
-            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, stride_A, stride_B, stride_ret, k
         );
         return;
     }
     if (k == 11){
         mul_fft_local<2048><<<min(N_total, 65536), 512>>>(
-            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+            A, B, ret, tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, stride_A, stride_B, stride_ret, k
         );
         return;
     }
@@ -1680,7 +1683,7 @@ void batch_mul_ntt(
 
     if (k == 12){
         mul_fft_local_spill<4096><<<N_batch, 512>>>(
-            A, B, ret, reinterpret_cast<uint3 *>(workspace), tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, k
+            A, B, ret, reinterpret_cast<uint3 *>(workspace), tables.roots_table_lv2, tables.inv2n_table + k, N_total, L_a, L_b, stride_A, stride_B, stride_ret, k
         );
         return;
     }
@@ -1728,7 +1731,7 @@ void batch_mul_ntt(
                             A, B,
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b
+                            N * 2, L_a, L_b, stride_A, stride_B
                         );
                     }
                     i += 4;
@@ -1744,7 +1747,7 @@ void batch_mul_ntt(
                             A, B,
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b
+                            N * 2, L_a, L_b, stride_A, stride_B
                         );
                     }
                     i += 3;
@@ -1805,7 +1808,7 @@ void batch_mul_ntt(
                         fft_level_backward_radix32_initial<<<num_blocks, dim3(32, 8, 1)>>>(
                             parts_a, k, ret, reinterpret_cast<uint32_t*>(parts_b),
                             tables.roots_table_lv2,
-                            N, L
+                            N, L, stride_ret
                         );
                     }
                     i -= 4;
@@ -1822,7 +1825,7 @@ void batch_mul_ntt(
                         fft_level_backward_radix16_initial<<<num_blocks, threads_per_block>>>(
                             parts_a, k, ret, reinterpret_cast<uint32_t*>(parts_b),
                             tables.roots_table_lv2,
-                            N, L
+                            N, L, stride_ret
                         );
                     }
                     i -= 3;
@@ -1833,34 +1836,34 @@ void batch_mul_ntt(
         if (K == 8192){
             int threads_per_block = min(L>>1, (size_t)1024);
             int num_blocks = min(N, 65536);
-            add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L);
+            add3_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(parts_a, ret, N, k, L, stride_ret);
         }else{
             if (N >= 85){
                 int threads_per_block = min(L>>1, (size_t)1024);
                 int num_blocks = min(N, 65536);
                 add2_single_block<<<num_blocks, dim3(32, (threads_per_block + 31) / 32, 1)>>>(
                     ret, reinterpret_cast<uint32_t *>(parts_b),
-                    N, k, L
+                    N, k, L, stride_ret
                 );
             }else{
                 const int block_size = 2048;
                 int num_blocks_x = min((size_t)256, max((size_t)1, (L + block_size - 1) / block_size));
                 int num_blocks_y = min(N, 65536 / num_blocks_x);
                 add2_reduce_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
-                    ret, reinterpret_cast<uint32_t *>(parts_b), reinterpret_cast<ushort2 *>(parts_a), N, k, L
+                    ret, reinterpret_cast<uint32_t *>(parts_b), reinterpret_cast<ushort2 *>(parts_a), N, k, L, stride_ret
                 );
                 add2_combine_blocks<<<min(N, 65536), dim3(32, 32, 1)>>>(
                     reinterpret_cast<ushort2 *>(parts_a), N, L
                 );
                 add2_apply_blocks<<<dim3(num_blocks_x, num_blocks_y, 1), dim3(32, 32, 1)>>>(
-                    ret, reinterpret_cast<ushort2 *>(parts_a), N, k, L
+                    ret, reinterpret_cast<ushort2 *>(parts_a), N, k, L, stride_ret
                 );
             }
         }
 
-        A += ((size_t)N) * L_a;
-        B += ((size_t)N) * L_b;
-        ret += N * L;
+        A += ((size_t)N) * stride_A;
+        B += ((size_t)N) * stride_B;
+        ret += ((size_t)N) * stride_ret;
     }
 }
 

@@ -42,6 +42,7 @@ struct QuickCheckFailure {
 
 __global__ static void reduce_words_mod_chunks_kernel(
     const uint32_t* words,
+    uint32_t stride_words,
     uint32_t words_per_number,
     uint32_t chunk_count,
     const uint32_t* chunk_base_pow_mod,
@@ -54,7 +55,7 @@ __global__ static void reduce_words_mod_chunks_kernel(
     const uint32_t number_idx = block / chunk_count;
     const uint32_t chunk_idx = block % chunk_count;
     const uint32_t chunk_start = chunk_idx * QUICK_CHECK_THREADS;
-    const size_t base_offset = (size_t)number_idx * words_per_number + chunk_start;
+    const size_t base_offset = (size_t)number_idx * stride_words + chunk_start;
 
     uint32_t thread_sum = 0;
     for (uint32_t i = threadIdx.x; i < QUICK_CHECK_THREADS; i += blockDim.x) {
@@ -149,6 +150,7 @@ static void reduce_numbers_mod_10007_cuda(
     const uint32_t* d_words,
     uint32_t N,
     uint32_t words_per_number,
+    uint32_t stride_words,
     const uint32_t* d_chunk_base_pow_mod,
     const uint32_t* d_local_pow_mod,
     uint32_t* d_stage0,
@@ -158,7 +160,7 @@ static void reduce_numbers_mod_10007_cuda(
     uint32_t current_count = (words_per_number + QUICK_CHECK_THREADS - 1) / QUICK_CHECK_THREADS;
     const uint32_t initial_blocks = N * current_count;
     reduce_words_mod_chunks_kernel<<<initial_blocks, QUICK_CHECK_THREADS>>>(
-        d_words, words_per_number, current_count, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0);
+        d_words, stride_words, words_per_number, current_count, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0);
     CUDA_CHECK(cudaGetLastError());
 
     uint32_t* current = d_stage0;
@@ -183,7 +185,10 @@ static void quick_check_products_mod_10007_cuda(
     const uint32_t* d_ret,
     uint32_t N,
     uint32_t L_a,
-    uint32_t L_b
+    uint32_t L_b,
+    uint32_t stride_A,
+    uint32_t stride_B,
+    uint32_t stride_ret
 ) {
     const uint32_t L = L_a + L_b;
     const uint32_t max_words = std::max(L, std::max(L_a, L_b));
@@ -229,9 +234,9 @@ static void quick_check_products_mod_10007_cuda(
                           (size_t)QUICK_CHECK_THREADS * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_failure, 0xff, sizeof(QuickCheckFailure)));
 
-    reduce_numbers_mod_10007_cuda(d_A, N, L_a, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_a_mod);
-    reduce_numbers_mod_10007_cuda(d_B, N, L_b, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_b_mod);
-    reduce_numbers_mod_10007_cuda(d_ret, N, L, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_ret_mod);
+    reduce_numbers_mod_10007_cuda(d_A, N, L_a, stride_A, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_a_mod);
+    reduce_numbers_mod_10007_cuda(d_B, N, L_b, stride_B, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_b_mod);
+    reduce_numbers_mod_10007_cuda(d_ret, N, L, stride_ret, d_chunk_base_pow_mod, d_local_pow_mod, d_stage0, d_stage1, d_ret_mod);
 
     const uint32_t compare_blocks = (N + QUICK_CHECK_THREADS - 1) / QUICK_CHECK_THREADS;
     compare_products_mod_kernel<<<compare_blocks, QUICK_CHECK_THREADS>>>(d_a_mod, d_b_mod, d_ret_mod, N, d_failure);
@@ -281,12 +286,18 @@ static bool test_configuration(
     bool verbose = false
 ) {
     const uint32_t L = L_a + L_b;
-    const size_t size_A_words = (size_t)N * L_a;
-    const size_t size_B_words = (size_t)N * L_b;
-    const size_t size_ret_words = (size_t)N * L;
+    std::bernoulli_distribution packed_dist(0.5);
+    std::uniform_int_distribution<uint32_t> extra_stride_dist(1u, 8u);
+    const uint32_t stride_A = packed_dist(rng) ? L_a : (L_a + extra_stride_dist(rng));
+    const uint32_t stride_B = packed_dist(rng) ? L_b : (L_b + extra_stride_dist(rng));
+    const uint32_t stride_ret = packed_dist(rng) ? L : (L + extra_stride_dist(rng));
+    const size_t size_A_words = (size_t)N * stride_A;
+    const size_t size_B_words = (size_t)N * stride_B;
+    const size_t size_ret_words = (size_t)N * stride_ret;
 
     if (verbose) {
-        printf("Testing N=%u, L_a=%u, L_b=%u (N*L=%zu)...\n", N, L_a, L_b, (size_t)N * L);
+        printf("Testing N=%u, L_a=%u, L_b=%u, stride_A=%u, stride_B=%u, stride_ret=%u...\n",
+               N, L_a, L_b, stride_A, stride_B, stride_ret);
     }
 
     std::vector<uint32_t> h_A(size_A_words);
@@ -294,8 +305,10 @@ static bool test_configuration(
     std::vector<uint32_t> h_ret(size_ret_words, 0);
 
     std::uniform_int_distribution<uint32_t> word_dist(0u, 0xffffffffu);
-    for (size_t i = 0; i < size_A_words; ++i) h_A[i] = word_dist(rng);
-    for (size_t i = 0; i < size_B_words; ++i) h_B[i] = word_dist(rng);
+    for (uint32_t i = 0; i < N; ++i) {
+        for (uint32_t j = 0; j < L_a; ++j) h_A[(size_t)i * stride_A + j] = word_dist(rng);
+        for (uint32_t j = 0; j < L_b; ++j) h_B[(size_t)i * stride_B + j] = word_dist(rng);
+    }
 
     uint32_t* d_A = nullptr;
     uint32_t* d_B = nullptr;
@@ -314,7 +327,7 @@ static bool test_configuration(
     CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), size_A_words * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), size_B_words * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b, stride_A, stride_B, stride_ret);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -325,10 +338,10 @@ static bool test_configuration(
         mpz_t a, b, expected, got;
         mpz_inits(a, b, expected, got, NULL);
 
-        words_to_mpz(a, &h_A[(size_t)i * L_a], L_a);
-        words_to_mpz(b, &h_B[(size_t)i * L_b], L_b);
+        words_to_mpz(a, &h_A[(size_t)i * stride_A], L_a);
+        words_to_mpz(b, &h_B[(size_t)i * stride_B], L_b);
         mpz_mul(expected, a, b);
-        words_to_mpz(got, &h_ret[(size_t)i * L], L);
+        words_to_mpz(got, &h_ret[(size_t)i * stride_ret], L);
 
         if (mpz_cmp(expected, got) != 0) {
             pass = false;
@@ -392,9 +405,12 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
     uint32_t N = (uint32_t)(target_NL / L_a);
     if (N == 0) N = 1;
     const uint32_t L = L_a + L_b;
-    const size_t size_A_words = (size_t)N * L_a;
-    const size_t size_B_words = (size_t)N * L_b;
-    const size_t size_ret_words = (size_t)N * L;
+    const uint32_t stride_A = L_a;
+    const uint32_t stride_B = L_b;
+    const uint32_t stride_ret = L;
+    const size_t size_A_words = (size_t)N * stride_A;
+    const size_t size_B_words = (size_t)N * stride_B;
+    const size_t size_ret_words = (size_t)N * stride_ret;
 
     printf("Benchmarking L_a=%u, L_b=%u, N=%u (N*L_a=%llu)...\n",
            L_a, L_b, N, (unsigned long long)((uint64_t)N * L_a));
@@ -449,9 +465,9 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
     CURAND_CHECK(curandGenerate(rand_gen, d_ret, size_ret_words));
 
     // Warmup
-    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
-    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
-    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b, stride_A, stride_B, stride_ret);
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b, stride_A, stride_B, stride_ret);
+    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b, stride_A, stride_B, stride_ret);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -462,7 +478,7 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < iterations; ++i) {
-        batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b);
+        batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b, stride_A, stride_B, stride_ret);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -479,7 +495,7 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
     printf("Mul/s: %8.2f K ", mul_per_sec_thousand);
     printf("Bandwidth (A+B+ret): %6.2f GB/s\n", bandwidth_gb_s);
 
-    quick_check_products_mod_10007_cuda(d_A, d_B, d_ret, N, L_a, L_b);
+    quick_check_products_mod_10007_cuda(d_A, d_B, d_ret, N, L_a, L_b, stride_A, stride_B, stride_ret);
 
     CURAND_CHECK(curandDestroyGenerator(rand_gen));
     CUDA_CHECK(cudaEventDestroy(start));
