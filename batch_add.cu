@@ -282,6 +282,10 @@ __global__ void batch_add_reduce_blocks_kernel(
             }
             __syncthreads();
 
+            if (threadIdx.y < blockDim.y) {
+                ushort compound = carry.y + ((threadIdx.y > 0) ? carry_info[threadIdx.y - 1].x : 0);
+                carry.x += compound >> 2;
+            }
             carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
             if (threadIdx.x == 0) {
                 carry.x = (threadIdx.y == 0) ? 0 : carry_info[threadIdx.y - 1].x;

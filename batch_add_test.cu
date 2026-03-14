@@ -172,6 +172,77 @@ bool verify_padding(const std::vector<uint32_t> & words, uint32_t N, uint32_t us
     return true;
 }
 
+bool test_long_carry_chain_case(bool verbose = false) {
+    constexpr uint32_t N = 1;
+    constexpr uint32_t L_a = 4096;
+    constexpr uint32_t L_b = 2049;
+    constexpr uint32_t L_c = 4096;
+    constexpr uint32_t stride_A = L_a;
+    constexpr uint32_t stride_B = L_b;
+    constexpr uint32_t stride_C = L_c;
+
+    if (verbose) {
+        printf("Testing dedicated long carry chain case...\n");
+    }
+
+    std::vector<uint32_t> h_A((size_t)N * stride_A, 0u);
+    std::vector<uint32_t> h_B((size_t)N * stride_B, 0u);
+    std::vector<uint32_t> h_C((size_t)N * stride_C, kOutputPadPattern);
+
+    h_A[2048] = 0xffffffffu;
+    h_B[2048] = 1u;
+    for (uint32_t i = 2049; i < L_a; ++i) {
+        h_A[i] = 0xffffffffu;
+    }
+
+    uint32_t * d_A = nullptr;
+    uint32_t * d_B = nullptr;
+    uint32_t * d_C = nullptr;
+    uint32_t * d_workspace = nullptr;
+
+    const size_t size_A = h_A.size() * sizeof(uint32_t);
+    const size_t size_B = h_B.size() * sizeof(uint32_t);
+    const size_t size_C = h_C.size() * sizeof(uint32_t);
+    const size_t workspace_size = batch_add_simple_workspace_size(N, L_a, L_b, L_c);
+
+    CUDA_CHECK(cudaMalloc(&d_A, size_A));
+    CUDA_CHECK(cudaMalloc(&d_B, size_B));
+    CUDA_CHECK(cudaMalloc(&d_C, size_C));
+    if (workspace_size > 0) {
+        CUDA_CHECK(cudaMalloc(&d_workspace, workspace_size));
+    }
+
+    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), size_A, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), size_B, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), size_C, cudaMemcpyHostToDevice));
+
+    batch_add_simple(d_A, d_B, d_C, d_workspace, N, L_a, L_b, L_c, stride_A, stride_B, stride_C);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, size_C, cudaMemcpyDeviceToHost));
+
+    bool pass = true;
+    for (uint32_t i = 0; i < L_c; ++i) {
+        if (h_C[i] != 0u) {
+            pass = false;
+            if (verbose) {
+                printf("  Long carry chain mismatch at word %u: expected=00000000 actual=%08x\n", i, h_C[i]);
+            }
+            break;
+        }
+    }
+
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_C));
+    if (d_workspace) CUDA_CHECK(cudaFree(d_workspace));
+
+    if (verbose) {
+        printf("  %s\n", pass ? "PASSED" : "FAILED");
+    }
+    return pass;
+}
+
 void fill_random_operand(
     std::vector<uint32_t> & words,
     uint32_t N,
@@ -498,6 +569,10 @@ int main(int argc, char **argv) {
             all_passed = false;
             break;
         }
+    }
+
+    if (all_passed && !test_long_carry_chain_case(true)) {
+        all_passed = false;
     }
 
     if (all_passed) {
