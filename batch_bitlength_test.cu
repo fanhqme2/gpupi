@@ -163,11 +163,6 @@ bool test_configuration(
 
     std::vector<uint32_t> h_A((size_t)N * stride);
 
-    uint32_t expected = 0u;
-    for (uint32_t i = 0; i < N; ++i) {
-        expected = std::max(expected, gmp_bitlength(h_A.data() + (size_t)i * stride, L));
-    }
-
     uint32_t * d_A = nullptr;
     uint32_t * d_workspace = nullptr;
     const size_t size_A = h_A.size() * sizeof(uint32_t);
@@ -178,6 +173,11 @@ bool test_configuration(
     }
     fill_input_device(d_A, N, L, stride, mode, seed);
     CUDA_CHECK(cudaMemcpy(h_A.data(), d_A, size_A, cudaMemcpyDeviceToHost));
+
+    uint32_t expected = 0u;
+    for (uint32_t i = 0; i < N; ++i) {
+        expected = std::max(expected, gmp_bitlength(h_A.data() + (size_t)i * stride, L));
+    }
 
     const uint32_t actual = batch_bitlength_max(d_A, d_workspace, N, L, stride);
     CUDA_CHECK(cudaGetLastError());
@@ -329,6 +329,8 @@ int main() {
 
     printf("\n=== Benchmark Tests ===\n\n");
     benchmark_configuration(100000000u, 1u, FillMode::VerySmall, seed++);
+    benchmark_configuration(100000000u, 2u, FillMode::VerySmall, seed++);
+    benchmark_configuration(100000000u, 4u, FillMode::VerySmall, seed++);
     benchmark_configuration(50000000u, 8u, FillMode::VerySmall, seed++);
     benchmark_configuration(10000000u, 64u, FillMode::RandomFull, seed++);
     benchmark_configuration(1000000u, 1024u, FillMode::RandomFull, seed++);
@@ -341,3 +343,28 @@ int main() {
     printf("\nSummary: %s\n", all_passed ? "PASSED" : "FAILED");
     return all_passed ? 0 : 1;
 }
+
+/*
+Benchmarking N=100000000, L=1, mode=very-small...
+  params size  400M, workspace size    0M Average time:  0.799 ms Throughput: 125084.657 Mnum/s Bandwidth: 500.34 GB/s Result=17
+Benchmarking N=100000000, L=2, mode=very-small...
+  params size  800M, workspace size    0M Average time:  1.028 ms Throughput: 97237.758 Mnum/s Bandwidth: 777.90 GB/s Result=40
+Benchmarking N=100000000, L=4, mode=very-small...
+  params size 1600M, workspace size    0M Average time:  1.505 ms Throughput: 66435.642 Mnum/s Bandwidth: 1062.97 GB/s Result=40
+Benchmarking N=50000000, L=8, mode=very-small...
+  params size 1600M, workspace size    0M Average time:  1.537 ms Throughput: 32530.790 Mnum/s Bandwidth: 1040.99 GB/s Result=40
+Benchmarking N=10000000, L=64, mode=random-full...
+  params size 2560M, workspace size    0M Average time:  1.251 ms Throughput: 7994.855 Mnum/s Bandwidth: 2046.68 GB/s Result=2048
+Benchmarking N=1000000, L=1024, mode=random-full...
+  params size 4096M, workspace size    0M Average time:  0.705 ms Throughput: 1418.825 Mnum/s Bandwidth: 5811.51 GB/s Result=32768
+Benchmarking N=1000000, L=1024, mode=very-small...
+  params size 4096M, workspace size    0M Average time:  2.915 ms Throughput:  343.014 Mnum/s Bandwidth: 1404.99 GB/s Result=40
+Benchmarking N=1000000, L=1024, mode=half-length...
+  params size 4096M, workspace size    0M Average time:  1.773 ms Throughput:  563.953 Mnum/s Bandwidth: 2309.95 GB/s Result=16383
+Benchmarking N=4, L=262144, mode=random-full...
+  params size    4M, workspace size    0M Average time:  0.497 ms Throughput:    0.008 Mnum/s Bandwidth:   8.45 GB/s Result=8388608
+Benchmarking N=4, L=262144, mode=very-small...
+  params size    4M, workspace size    0M Average time:  1.807 ms Throughput:    0.002 Mnum/s Bandwidth:   2.32 GB/s Result=40
+Benchmarking N=4, L=262144, mode=half-length...
+  params size    4M, workspace size    0M Average time:  1.159 ms Throughput:    0.003 Mnum/s Bandwidth:   3.62 GB/s Result=4194291
+*/

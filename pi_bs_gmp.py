@@ -37,19 +37,62 @@ def trim_prec_quotient(*args, prec_bits):
             return [x >> crop for x in args]
     return args
 
+def reduce_gcd_quotient(a, b):
+    ga = a
+    gb = b
+    while ga != 0:
+        ga, gb = gb % ga, ga
+    return a // gb, b // gb
+
 def binary_split(i, j, is_initial = False):
     if j == i + 1:
-        i_mpz = mpz(i)
-        i1 = i_mpz + 1
-        p = (6 * i_mpz + 1) * (2 * i_mpz + 1) * (6 * i_mpz + 5)
-        scale = i1 * i1 * i1
-        q = scale * (640320 * 640320 * 26680)
-        scale_2 = scale * (640320 * 40020)
-        r = (545140134 * i_mpz + 13591409) * scale_2
-        g = gmpy2.gcd(p, scale_2)
-        p //= g
-        q //= g
-        r //= g
+        # i_mpz = mpz(i)
+        # i1 = i_mpz + 1
+        # p = (6 * i_mpz + 1) * (2 * i_mpz + 1) * (6 * i_mpz + 5)
+        # scale = i1 * i1 * i1
+        # q = scale * (640320 * 640320 * 26680)
+        # scale_2 = scale * (640320 * 40020)
+        # r = (545140134 * i_mpz + 13591409) * scale_2
+        # g = gmpy2.gcd(p, scale_2)
+        # p //= g
+        # q //= g
+        # r //= g
+        # p0 = p
+        # q0 = q
+        # r0 = r
+
+        p1 = 6 * i + 1
+        p2 = 2 * i + 1
+        p3 = 6 * i + 5
+        q1 = i + 1
+        q2 = i + 1
+        q3 = i + 1
+        q4 = 640320
+        q5 = 40020
+        q6 = 426880
+        r1 = 545140134 * i + 13591409
+
+        if p1 % 5 == 0 and q1 % 5 == 0:
+            p1 //= 5
+            q1 //= 5
+        if p1 % 5 == 0 and q2 % 5 == 0:
+            p1 //= 5
+            q2 //= 5
+        if p1 % 5 == 0 and q3 % 5 == 0:
+            p1 //= 5
+            q3 //= 5
+        p1, q4 = reduce_gcd_quotient(p1, q4)
+        p1, q5 = reduce_gcd_quotient(p1, q5)
+        p2, q4 = reduce_gcd_quotient(p2, q4)
+        p2, q5 = reduce_gcd_quotient(p2, q5)
+        p3, q4 = reduce_gcd_quotient(p3, q4)
+        p3, q5 = reduce_gcd_quotient(p3, q5)
+
+
+        p = mpz(p1) * p2 * p3
+        q = mpz(q1) * q2 * q3 * q4 * q5 * q6
+        r = mpz(r1) * q1 * q2 * q3 * q4 * q5
+
         if is_initial:
             return q, r
         else:
@@ -169,21 +212,21 @@ def recursive_decimal(p, B, L):
     # p >> B  for L decimal digits
     # we are extracting digits of Pi, and it is guarenteed that there are at most 9 consecutive 9s in the first one billion digits
     if L <= 512:
-        ret = str((p * (10 ** L)) >> B)
-        ret = '0' * (L - len(ret)) + ret
-        return ret
-        # ret = ''
-        # while L > 0:
-        #     digits = min(L, 9)
-        #     scale = 10 ** digits
-        #     prod = p * mpz(scale)
-        #     chunk = prod >> B
-        #     p = prod & ((mpz(1) << B) - 1)
-        #     chunk = str(chunk)
-        #     chunk = '0' * (digits - len(chunk)) + chunk
-        #     ret = ret + chunk
-        #     L -= 9
+        # ret = str((p * (10 ** L)) >> B)
+        # ret = '0' * (L - len(ret)) + ret
         # return ret
+        ret = ''
+        while L > 0:
+            digits = min(L, 9)
+            scale = 10 ** digits
+            prod = p * mpz(scale)
+            chunk = prod >> B
+            p = prod & ((mpz(1) << B) - 1)
+            chunk = str(chunk)
+            chunk = '0' * (digits - len(chunk)) + chunk
+            ret = ret + chunk
+            L -= 9
+        return ret
     L_half = 1
     power_idx = 0
     while L_half * 2 <= L // 2:
