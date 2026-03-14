@@ -476,8 +476,9 @@ void batch_add_simple(
     } else {
         ushort2 * block_carry_summary = reinterpret_cast<ushort2 *>(workspace);
         const uint32_t blocks_per_num = (L_c + kChunkSize - 1u) / kChunkSize;
-        const uint32_t num_blocks_x = std::min<uint32_t>(256u, std::max<uint32_t>(1u, blocks_per_num));
-        const uint32_t num_blocks_y = std::min<uint32_t>(N, 65535u / num_blocks_x + 1u);
+        const uint32_t num_blocks_x_limit = std::max<uint32_t>(256u, 65535u / std::max<uint32_t>(N, 1u));
+        const uint32_t num_blocks_x = std::min<uint32_t>(num_blocks_x_limit, std::max<uint32_t>(1u, blocks_per_num));
+        const uint32_t num_blocks_y = std::min<uint32_t>(N, std::max<uint32_t>(1u, 65535u / num_blocks_x));
 
         batch_add_reduce_blocks_kernel<<<dim3(num_blocks_x, num_blocks_y, 1u), dim3(32u, 32u, 1u)>>>(
             A, B, C, block_carry_summary, N, L_a, L_b, L_c, stride_A, stride_B, stride_C
