@@ -12,12 +12,15 @@ __global__ void batch_mul_naive_single_kernel(uint32_t * A, uint32_t * B, uint32
 
     int L = L_a + L_b;
     
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += gridDim.x * blockDim.x){
-        for (int j = 0; j < L_a; j ++){
-            ab[j] = A[idx * stride_A + j];
-        }
-        for (int j = 0; j < L_b; j ++){
-            ab[L_a + j] = B[idx * stride_B + j];
+    for (int idx0 = blockIdx.x * blockDim.x; idx0 < N; idx0 += gridDim.x * blockDim.x){
+        int idx = idx0 + threadIdx.x;
+        if (idx < N){
+            for (int j = 0; j < L_a; j ++){
+                ab[j] = A[idx * stride_A + j];
+            }
+            for (int j = 0; j < L_b; j ++){
+                ab[L_a + j] = B[idx * stride_B + j];
+            }
         }
         __syncthreads();
         for (int i = 0; i < L; i ++){
@@ -62,8 +65,10 @@ __global__ void batch_mul_naive_single_kernel(uint32_t * A, uint32_t * B, uint32
             }
         }
         __syncthreads();
-        for (int j = 0; j < L; j ++){
-            ret[idx * stride_ret + j] = r[j];
+        if (idx < N){
+            for (int j = 0; j < L; j ++){
+                ret[idx * stride_ret + j] = r[j];
+            }
         }
         __syncthreads();
     }

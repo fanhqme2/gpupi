@@ -88,6 +88,8 @@ bool test_configuration(int N, int L_a, int L_b, int stride_A, int stride_B, int
     check_cuda(cudaGetLastError(), "batch_mul_naive launch");
     check_cuda(cudaDeviceSynchronize(), "batch_mul_naive sync");
 
+    check_cuda(cudaMemcpy(h_A, d_A, size_A, cudaMemcpyDeviceToHost), "cudaMemcpy A D2H");
+    check_cuda(cudaMemcpy(h_B, d_B, size_B, cudaMemcpyDeviceToHost), "cudaMemcpy B D2H");
     check_cuda(cudaMemcpy(h_ret, d_ret, size_ret, cudaMemcpyDeviceToHost), "cudaMemcpy ret D2H");
 
     bool pass = true;
@@ -238,7 +240,8 @@ void run_fixed_correctness_tests(bool* all_passed) {
         {65, 31, 33, 36, 40, 70},
         {96, 32, 32, 32, 35, 70},
         {127, 48, 16, 51, 21, 70},
-        {257, 5, 59, 8, 64, 70}
+        {257, 5, 59, 8, 64, 70},
+        {3, 513, 511, 518, 517, 1029}
     };
 
     printf("Fixed configuration tests:\n");
@@ -254,9 +257,9 @@ void run_fixed_correctness_tests(bool* all_passed) {
 void run_random_correctness_tests(const char* label, int iterations, int max_N, bool* all_passed) {
     printf("%s:\n", label);
     for (int t = 0; t < iterations; ++t) {
-        int test_L = 2 << (rand() % 10);
-        int L_a = 1 + rand() % (test_L - 1);
-        int max_L_b = test_L - L_a;
+        int test_L_max = 2 << (rand() % 10);
+        int L_a = 1 + rand() % (test_L_max - 1);
+        int max_L_b = test_L_max - L_a;
         int L_b = 1 + rand() % max_L_b;
         int stride_A = L_a + rand() % 5;
         int stride_B = L_b + rand() % 5;
@@ -273,9 +276,9 @@ void run_random_correctness_tests(const char* label, int iterations, int max_N, 
 void run_scaled_correctness_tests(const char* label, int iterations, int target_total_words, bool* all_passed) {
     printf("%s:\n", label);
     for (int t = 0; t < iterations; ++t) {
-        int test_L = 64 << (rand() % 5);
-        int L_a = 1 + rand() % (test_L - 1);
-        int max_L_b = test_L - L_a;
+        int test_L_max = 64 << (rand() % 5);
+        int L_a = 1 + rand() % (test_L_max - 1);
+        int max_L_b = test_L_max - L_a;
         int L_b = 1 + rand() % max_L_b;
         int L_ret = L_a + L_b;
         int stride_A = L_a + rand() % 7;
