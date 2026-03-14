@@ -28,6 +28,39 @@ void words_to_mpz(mpz_t out, const uint32_t * words, size_t count) {
     mpz_import(out, count, -1, sizeof(uint32_t), 0, 0, words);
 }
 
+void print_limb_window(
+    const uint32_t * a_row,
+    const uint32_t * b_row,
+    const uint32_t * c_row,
+    uint32_t L_a,
+    uint32_t L_b,
+    uint32_t L_c,
+    uint32_t mismatch_idx
+) {
+    const uint32_t window_lo = (mismatch_idx > 3u) ? mismatch_idx - 3u : 0u;
+    const uint32_t window_hi = std::min<uint32_t>(L_c, mismatch_idx + 4u);
+    uint64_t carry = 0;
+    std::vector<uint32_t> expected(L_c);
+    for (uint32_t i = 0; i < L_c; ++i) {
+        const uint64_t a = (i < L_a) ? a_row[i] : 0u;
+        const uint64_t b = (i < L_b) ? b_row[i] : 0u;
+        const uint64_t sum = a + b + carry;
+        expected[i] = (uint32_t)sum;
+        carry = sum >> 32;
+    }
+
+    printf("  First mismatched limb: %u\n", mismatch_idx);
+    printf("  Window [%u, %u):\n", window_lo, window_hi);
+    for (uint32_t i = window_lo; i < window_hi; ++i) {
+        printf("    limb %u: A=%08x B=%08x Expected=%08x Actual=%08x\n",
+               i,
+               (i < L_a) ? a_row[i] : 0u,
+               (i < L_b) ? b_row[i] : 0u,
+               expected[i],
+               c_row[i]);
+    }
+}
+
 bool verify_results_with_gmp(
     const std::vector<uint32_t> & h_A,
     const std::vector<uint32_t> & h_B,
@@ -65,10 +98,24 @@ bool verify_results_with_gmp(
 
         if (mpz_cmp(expected, actual) != 0) {
             printf("  GMP spot-check failed at index %u\n", idx);
-            gmp_printf("  A        = %Zx\n", a);
-            gmp_printf("  B        = %Zx\n", b);
-            gmp_printf("  Expected = %Zx\n", expected);
-            gmp_printf("  Actual   = %Zx\n", actual);
+            const uint32_t * a_row = h_A.data() + (size_t)idx * stride_A;
+            const uint32_t * b_row = h_B.data() + (size_t)idx * stride_B;
+            const uint32_t * c_row = h_C.data() + (size_t)idx * stride_C;
+            uint32_t mismatch_idx = 0;
+            uint64_t carry_words = 0;
+            for (; mismatch_idx < calc_len; ++mismatch_idx) {
+                const uint64_t av = (mismatch_idx < L_a) ? a_row[mismatch_idx] : 0u;
+                const uint64_t bv = (mismatch_idx < L_b) ? b_row[mismatch_idx] : 0u;
+                const uint64_t sum = av + bv + carry_words;
+                if ((uint32_t)sum != c_row[mismatch_idx]) {
+                    break;
+                }
+                carry_words = sum >> 32;
+            }
+            if (mismatch_idx == calc_len && calc_len > 0) {
+                mismatch_idx = calc_len - 1;
+            }
+            print_limb_window(a_row, b_row, c_row, L_a, L_b, calc_len, mismatch_idx);
             mpz_clears(a, b, sum, expected, actual, NULL);
             return false;
         }
@@ -180,10 +227,24 @@ bool test_configuration(
             pass = false;
             if (verbose) {
                 printf("  Mismatch at index %u\n", i);
-                gmp_printf("  A        = %Zx\n", a);
-                gmp_printf("  B        = %Zx\n", b);
-                gmp_printf("  Expected = %Zx\n", expected);
-                gmp_printf("  Actual   = %Zx\n", actual);
+                const uint32_t * a_row = h_A.data() + (size_t)i * stride_A;
+                const uint32_t * b_row = h_B.data() + (size_t)i * stride_B;
+                const uint32_t * c_row = h_C.data() + (size_t)i * stride_C;
+                uint32_t mismatch_idx = 0;
+                uint64_t carry_words = 0;
+                for (; mismatch_idx < calc_len; ++mismatch_idx) {
+                    const uint64_t av = (mismatch_idx < L_a) ? a_row[mismatch_idx] : 0u;
+                    const uint64_t bv = (mismatch_idx < L_b) ? b_row[mismatch_idx] : 0u;
+                    const uint64_t sum_word = av + bv + carry_words;
+                    if ((uint32_t)sum_word != c_row[mismatch_idx]) {
+                        break;
+                    }
+                    carry_words = sum_word >> 32;
+                }
+                if (mismatch_idx == calc_len && calc_len > 0) {
+                    mismatch_idx = calc_len - 1;
+                }
+                print_limb_window(a_row, b_row, c_row, L_a, L_b, calc_len, mismatch_idx);
             }
         }
 
@@ -329,11 +390,11 @@ void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint32_t L_c, uint64_t 
             h_A_verify, h_B_verify, h_C_verify,
             N, L_a, L_b, L_c,
             stride_A, stride_B, stride_C,
-            5u)) {
+            min(N, 5u))) {
         fprintf(stderr, "  GMP spot-check failed after benchmark\n");
         exit(1);
     }
-    printf("  GMP spot-check: PASSED (5 samples)\n");
+    printf("  GMP spot-check: PASSED (%u samples)\n", min(N, 5u));
 
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
@@ -411,7 +472,20 @@ int main() {
     }
 
     printf("\n=== Benchmark Tests ===\n\n");
+    benchmark_configuration(1, 1, 1, 100000000ull);
+    benchmark_configuration(1, 1, 2, 100000000ull);
+    benchmark_configuration(2, 2, 3, 100000000ull);
+    benchmark_configuration(4, 4, 5, 100000000ull);
+    benchmark_configuration(8, 8, 9, 100000000ull);
     benchmark_configuration(16, 16, 17, 100000000ull);
+    benchmark_configuration(24, 24, 25, 100000000ull);
+    benchmark_configuration(30, 30, 31, 100000000ull);
+    benchmark_configuration(31, 31, 32, 100000000ull);
+    benchmark_configuration(32, 32, 33, 100000000ull);
+    benchmark_configuration(63, 63, 64, 100000000ull);
+    benchmark_configuration(64, 64, 65, 100000000ull);
+    benchmark_configuration(127, 127, 128, 100000000ull);
+    benchmark_configuration(128, 128, 129, 100000000ull);
     benchmark_configuration(8, 1024, 1025, 100000000ull);
     benchmark_configuration(1024, 8, 1025, 100000000ull);
     benchmark_configuration(256, 256, 257, 100000000ull);
@@ -421,6 +495,9 @@ int main() {
     benchmark_configuration(4096, 4096, 4097, 100000000ull);
     benchmark_configuration(16384, 16384, 16385, 100000000ull);
     benchmark_configuration(524288, 524288, 524289, 100000000ull);
+    for (int i = 20; i <= 27; i ++){
+        benchmark_configuration(1 << i, 1 << i, (1 << i), 100000000ull);
+    }
 
     printf("\nSummary: %s\n", all_passed ? "PASSED" : "FAILED");
     return all_passed ? 0 : 1;
