@@ -25,6 +25,7 @@ __global__ void batch_bitlength_thread_kernel(
     uint32_t L,
     uint32_t stride_A
 ) {
+    uint32_t local_max = 0u;
     for (uint32_t idx0 = blockIdx.x * blockDim.x; idx0 < N; idx0 += gridDim.x * blockDim.x) {
         const uint32_t idx = idx0 + threadIdx.x;
         if (idx >= N) continue;
@@ -39,8 +40,9 @@ __global__ void batch_bitlength_thread_kernel(
                 break;
             }
         }
-        atomicMax(result, local);
+        local_max = max(local_max, local);
     }
+    atomicMax(result, local_max);
 }
 
 __global__ void batch_bitlength_warp_kernel(
@@ -54,7 +56,7 @@ __global__ void batch_bitlength_warp_kernel(
     const uint32_t warps_per_block = blockDim.y;
     const uint32_t warp_global = blockIdx.x * warps_per_block + threadIdx.y;
     const uint32_t warp_stride = gridDim.x * warps_per_block;
-
+    uint32_t local_max = 0u;
     for (uint32_t idx = warp_global; idx < N; idx += warp_stride) {
         const uint32_t * row = A + (size_t)idx * stride_A;
         uint32_t local = 0u;
@@ -71,9 +73,13 @@ __global__ void batch_bitlength_warp_kernel(
                 break;
             }
         }
-        if (local != 0u) {
-            atomicMax(result, local);
-        }
+        local_max = max(local_max, local);
+    }
+    for (int delta = 1; delta < 32; delta *= 2) {
+        local_max = max(local_max, __shfl_down_sync(0xffffffffu, local_max, delta));
+    }
+    if (lane == 0) {
+        atomicMax(result, local_max);
     }
 }
 

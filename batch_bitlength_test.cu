@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <curand.h>
 #include <gmp.h>
 
 #include <algorithm>
@@ -6,7 +7,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <random>
 #include <vector>
 
 #include "batch_bitlength.h"
@@ -15,6 +15,14 @@
     cudaError_t _err = (call); \
     if (_err != cudaSuccess) { \
         fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(_err)); \
+        exit(1); \
+    } \
+} while (0)
+
+#define CURAND_CHECK(call) do { \
+    curandStatus_t _err = (call); \
+    if (_err != CURAND_STATUS_SUCCESS) { \
+        fprintf(stderr, "cuRAND error at %s:%d: %d\n", __FILE__, __LINE__, (int)_err); \
         exit(1); \
     } \
 } while (0)
@@ -29,6 +37,55 @@ enum class FillMode {
     HalfLength
 };
 
+__global__ void shape_input_kernel(
+    uint32_t * words,
+    uint32_t N,
+    uint32_t L,
+    uint32_t stride,
+    FillMode mode
+) {
+    const size_t total_words = (size_t)N * stride;
+    for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total_words;
+         idx += (size_t)gridDim.x * blockDim.x) {
+        const uint32_t col = (uint32_t)(idx % stride);
+        uint32_t value = words[idx];
+
+        if (col >= L) {
+            words[idx] = kInputPadPattern;
+            continue;
+        }
+
+        switch (mode) {
+            case FillMode::RandomFull:
+                break;
+            case FillMode::VerySmall: {
+                const uint32_t row = (uint32_t)(idx / stride);
+                if (col == 0u) {
+                    words[idx] = (value & 0xffffu) + 1u;
+                } else if (col == 1u && (row & 1u) != 0u) {
+                    words[idx] = value & 0xffu;
+                } else {
+                    words[idx] = 0u;
+                }
+                break;
+            }
+            case FillMode::HalfLength: {
+                const uint32_t top = (L == 0u) ? 0u : (L - 1u) / 2u;
+                if (col < top) {
+                    break;
+                }
+                if (col == top) {
+                    words[idx] = 1u << (value % 31u);
+                } else {
+                    words[idx] = 0u;
+                }
+                break;
+            }
+        }
+    }
+}
+
 void words_to_mpz(mpz_t out, const uint32_t * words, size_t count) {
     mpz_import(out, count, -1, sizeof(uint32_t), 0, 0, words);
 }
@@ -42,47 +99,33 @@ uint32_t gmp_bitlength(const uint32_t * words, uint32_t L) {
     return bits;
 }
 
-void fill_input(
-    std::vector<uint32_t> & words,
+void fill_input_device(
+    uint32_t * d_words,
     uint32_t N,
     uint32_t L,
     uint32_t stride,
     FillMode mode,
-    std::mt19937_64 & rng
+    uint64_t seed
 ) {
-    std::uniform_int_distribution<uint32_t> dist(0u, 0xffffffffu);
-    std::fill(words.begin(), words.end(), kInputPadPattern);
-
-    for (uint32_t i = 0; i < N; ++i) {
-        uint32_t * row = words.data() + (size_t)i * stride;
-        for (uint32_t j = 0; j < L; ++j) {
-            row[j] = 0u;
-        }
-        switch (mode) {
-            case FillMode::RandomFull:
-                for (uint32_t j = 0; j < L; ++j) {
-                    row[j] = dist(rng);
-                }
-                break;
-            case FillMode::VerySmall:
-                if (L > 0) {
-                    row[0] = (dist(rng) & 0xffffu) + 1u;
-                }
-                if (L > 1 && (i & 1u) != 0u) {
-                    row[1] = dist(rng) & 0xffu;
-                }
-                break;
-            case FillMode::HalfLength:
-                if (L > 0) {
-                    const uint32_t top = (L - 1u) / 2u;
-                    row[top] = 1u << (dist(rng) % 31u);
-                    for (uint32_t j = 0; j < top; ++j) {
-                        row[j] = dist(rng);
-                    }
-                }
-                break;
-        }
+    const size_t total_words = (size_t)N * stride;
+    if (total_words == 0) {
+        return;
     }
+
+    curandGenerator_t rand_gen = nullptr;
+    CURAND_CHECK(curandCreateGenerator(&rand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+    CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(rand_gen, seed));
+    CURAND_CHECK(curandSetGeneratorOffset(rand_gen, 0ULL));
+    CURAND_CHECK(curandGenerate(rand_gen, d_words, total_words));
+
+    const uint32_t threads_per_block = 256u;
+    const uint32_t num_blocks = std::min<uint32_t>(
+        (uint32_t)((total_words + threads_per_block - 1u) / threads_per_block),
+        65535u);
+    shape_input_kernel<<<num_blocks, threads_per_block>>>(d_words, N, L, stride, mode);
+    CUDA_CHECK(cudaGetLastError());
+
+    CURAND_CHECK(curandDestroyGenerator(rand_gen));
 }
 
 bool verify_padding(const std::vector<uint32_t> & words, uint32_t N, uint32_t L, uint32_t stride) {
@@ -111,7 +154,7 @@ bool test_configuration(
     uint32_t L,
     uint32_t stride,
     FillMode mode,
-    std::mt19937_64 & rng,
+    uint64_t seed,
     bool verbose
 ) {
     if (verbose) {
@@ -119,7 +162,6 @@ bool test_configuration(
     }
 
     std::vector<uint32_t> h_A((size_t)N * stride);
-    fill_input(h_A, N, L, stride, mode, rng);
 
     uint32_t expected = 0u;
     for (uint32_t i = 0; i < N; ++i) {
@@ -134,7 +176,8 @@ bool test_configuration(
     if (workspace_size > 0) {
         CUDA_CHECK(cudaMalloc(&d_workspace, workspace_size));
     }
-    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), size_A, cudaMemcpyHostToDevice));
+    fill_input_device(d_A, N, L, stride, mode, seed);
+    CUDA_CHECK(cudaMemcpy(h_A.data(), d_A, size_A, cudaMemcpyDeviceToHost));
 
     const uint32_t actual = batch_bitlength_max(d_A, d_workspace, N, L, stride);
     CUDA_CHECK(cudaGetLastError());
@@ -164,16 +207,13 @@ bool test_configuration(
 void benchmark_configuration(
     uint32_t N,
     uint32_t L,
-    FillMode mode
+    FillMode mode,
+    uint64_t seed
 ) {
     const uint32_t stride = L;
-    std::vector<uint32_t> h_A((size_t)N * stride);
-    std::mt19937_64 rng(0x1234abcdULL + (uint64_t)L * 17u + (uint64_t)N);
-    fill_input(h_A, N, L, stride, mode, rng);
-
     uint32_t * d_A = nullptr;
     uint32_t * d_workspace = nullptr;
-    const size_t size_A = h_A.size() * sizeof(uint32_t);
+    const size_t size_A = (size_t)N * stride * sizeof(uint32_t);
     const size_t workspace_size = batch_bitlength_workspace_size(N, L);
 
     printf("Benchmarking N=%u, L=%u, mode=%s...\n", N, L, fill_mode_name(mode));
@@ -191,7 +231,7 @@ void benchmark_configuration(
             return;
         }
     }
-    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), size_A, cudaMemcpyHostToDevice));
+    fill_input_device(d_A, N, L, stride, mode, seed);
 
     batch_bitlength_max(d_A, d_workspace, N, L, stride);
     batch_bitlength_max(d_A, d_workspace, N, L, stride);
@@ -237,8 +277,8 @@ void benchmark_configuration(
 }  // namespace
 
 int main() {
-    std::mt19937_64 rng(123456789ull);
     bool all_passed = true;
+    uint64_t seed = 123456789ull;
 
     printf("=== Correctness Tests ===\n\n");
 
@@ -263,7 +303,7 @@ int main() {
     };
 
     for (const FixedCase & cfg : fixed_cases) {
-        if (!test_configuration(cfg.N, cfg.L, cfg.stride, cfg.mode, rng, true)) {
+        if (!test_configuration(cfg.N, cfg.L, cfg.stride, cfg.mode, seed++, true)) {
             all_passed = false;
             break;
         }
@@ -271,20 +311,16 @@ int main() {
 
     if (all_passed) {
         printf("\nRandomized tests:\n");
-        std::uniform_int_distribution<uint32_t> n_dist(1u, 128u);
-        std::uniform_int_distribution<uint32_t> n_small_dist(1u, 8u);
-        std::uniform_int_distribution<uint32_t> len_small_dist(0u, 64u);
-        std::uniform_int_distribution<uint32_t> len_large_dist(2048u, 12000u);
-        std::uniform_int_distribution<uint32_t> extra_stride_dist(0u, 8u);
-        std::uniform_int_distribution<int> mode_dist(0, 2);
-
         for (int t = 0; t < 30; ++t) {
             const bool large_case = (t >= 15);
-            const uint32_t N = large_case ? n_small_dist(rng) : n_dist(rng);
-            const uint32_t L = large_case ? len_large_dist(rng) : len_small_dist(rng);
-            const uint32_t stride = L + extra_stride_dist(rng);
-            const FillMode mode = static_cast<FillMode>(mode_dist(rng));
-            if (!test_configuration(N, L, stride, mode, rng, true)) {
+            const uint32_t N = large_case ? (1u + (uint32_t)(seed % 8u)) : (1u + (uint32_t)(seed % 128u));
+            seed = seed * 0x9e3779b97f4a7c15ULL + 0xbf58476d1ce4e5b9ULL;
+            const uint32_t L = large_case ? (2048u + (uint32_t)(seed % 9953u)) : (uint32_t)(seed % 65u);
+            seed = seed * 0x9e3779b97f4a7c15ULL + 0xbf58476d1ce4e5b9ULL;
+            const uint32_t stride = L + (uint32_t)(seed % 9u);
+            const FillMode mode = static_cast<FillMode>(seed % 3u);
+            seed = seed * 0x9e3779b97f4a7c15ULL + 0xbf58476d1ce4e5b9ULL;
+            if (!test_configuration(N, L, stride, mode, seed++, true)) {
                 all_passed = false;
                 break;
             }
@@ -292,15 +328,15 @@ int main() {
     }
 
     printf("\n=== Benchmark Tests ===\n\n");
-    benchmark_configuration(100000000u, 1u, FillMode::VerySmall);
-    benchmark_configuration(50000000u, 8u, FillMode::VerySmall);
-    benchmark_configuration(10000000u, 64u, FillMode::RandomFull);
-    benchmark_configuration(1000000u, 1024u, FillMode::RandomFull);
-    benchmark_configuration(1000000u, 1024u, FillMode::VerySmall);
-    benchmark_configuration(1000000u, 1024u, FillMode::HalfLength);
-    benchmark_configuration(4u, 262144u, FillMode::RandomFull);
-    benchmark_configuration(4u, 262144u, FillMode::VerySmall);
-    benchmark_configuration(4u, 262144u, FillMode::HalfLength);
+    benchmark_configuration(100000000u, 1u, FillMode::VerySmall, seed++);
+    benchmark_configuration(50000000u, 8u, FillMode::VerySmall, seed++);
+    benchmark_configuration(10000000u, 64u, FillMode::RandomFull, seed++);
+    benchmark_configuration(1000000u, 1024u, FillMode::RandomFull, seed++);
+    benchmark_configuration(1000000u, 1024u, FillMode::VerySmall, seed++);
+    benchmark_configuration(1000000u, 1024u, FillMode::HalfLength, seed++);
+    benchmark_configuration(4u, 262144u, FillMode::RandomFull, seed++);
+    benchmark_configuration(4u, 262144u, FillMode::VerySmall, seed++);
+    benchmark_configuration(4u, 262144u, FillMode::HalfLength, seed++);
 
     printf("\nSummary: %s\n", all_passed ? "PASSED" : "FAILED");
     return all_passed ? 0 : 1;
