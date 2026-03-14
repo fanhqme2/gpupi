@@ -558,7 +558,7 @@ int main() {
     if (!all_passed) goto done;
 
     printf("=== Benchmark Tests ===\n\n");
-    for (uint32_t e = 8; e <= 26; ++e) {
+    for (uint32_t e = 8; e <= 27; ++e) {
         
         uint32_t L_a = 1u << e;
         uint32_t L_b = L_a;
@@ -615,4 +615,6 @@ Benchmarking L_a=33554432, L_b=33554432, N=2 (N*L_a=67108864)...
   params size 1073M, workspace size 1610M   Average time: 32.037 ms Mul/s:     0.06 K Bandwidth (A+B+ret):  33.52 GB/s
 Benchmarking L_a=67108864, L_b=67108864, N=1 (N*L_a=67108864)...
   params size 1073M, workspace size 3221M   Average time: 33.748 ms Mul/s:     0.03 K Bandwidth (A+B+ret):  31.82 GB/s
+Benchmarking L_a=134217728, L_b=134217728, N=1 (N*L_a=134217728)...
+  params size 2147M, workspace size 6442M   Average time: 75.224 ms Mul/s:     0.01 K Bandwidth (A+B+ret):  28.55 GB/s
 */
