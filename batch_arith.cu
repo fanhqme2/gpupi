@@ -96,6 +96,10 @@ bool same_batch(BatchMPArray a, BatchMPArray b) {
 
 }  // namespace
 
+cudaError_t batch_mp_ensure_workspace(BatchMPContext *ctx, size_t required_bytes){
+    return ensure_workspace(ctx, required_bytes);
+}
+
 BatchMPArray batch_mp_array_create(uint32_t batch_size, uint32_t length, uint32_t stride) {
     BatchMPArray array{};
     array.length = length;

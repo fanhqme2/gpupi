@@ -38,6 +38,8 @@ void batch_mp_destroy(BatchMPContext * ctx);
 // Return the currently allocated shared workspace size in bytes. Accepts nullptr.
 size_t batch_mp_workspace_size(const BatchMPContext * ctx);
 
+cudaError_t batch_mp_ensure_workspace(BatchMPContext *ctx, size_t required_bytes);
+
 // Multiply N pairs of large integers.
 // Uses the naive kernel when L_a + L_b <= 1024, otherwise uses the NTT kernel.
 // Returns cudaErrorInvalidValue if the batch dimensions mismatch or if C.length != A.length + B.length.

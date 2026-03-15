@@ -167,7 +167,7 @@ __global__ void batch_bitlength_chunk_kernel(
 size_t batch_bitlength_workspace_size(uint32_t N, uint32_t L) {
     (void)N;
     (void)L;
-    return 0;
+    return 4;
 }
 
 template<LengthMode MODE>
@@ -182,8 +182,7 @@ uint32_t batch_length_max_impl(
         return 0u;
     }
 
-    uint32_t * d_result = nullptr;
-    cudaMalloc(&d_result, sizeof(uint32_t));
+    uint32_t * d_result = workspace;
     cudaMemset(d_result, 0, sizeof(uint32_t));
 
     if (L <= kSmallLThreadThreshold) {
@@ -210,7 +209,6 @@ uint32_t batch_length_max_impl(
 
     uint32_t h_result = 0u;
     cudaMemcpy(&h_result, d_result, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-    cudaFree(d_result);
     return h_result;
 }
 
