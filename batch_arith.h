@@ -108,3 +108,10 @@ cudaError_t batch_mp_bitlength_max(
     BatchMPArray A,
     uint32_t * result
 );
+
+// Compute the maximum non-zero limb count among N large integers.
+cudaError_t batch_mp_limblength_max(
+    BatchMPContext * ctx,
+    BatchMPArray A,
+    uint32_t * result
+);

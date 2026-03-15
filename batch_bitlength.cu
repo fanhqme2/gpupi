@@ -12,11 +12,26 @@ constexpr uint32_t kLargeLThreshold = 2048u;
 constexpr uint32_t kSmallNThreshold = 84u;
 constexpr uint32_t kChunkSize = 4096u;
 
+enum class LengthMode {
+    Bit,
+    Limb
+};
+
 __device__ __forceinline__ uint32_t bitlength_word(uint32_t word) {
     return word == 0u ? 0u : 32u - (uint32_t)__clz(word);
 }
 
-template<int THREADS>
+template<LengthMode MODE>
+__device__ __forceinline__ uint32_t measure_nonzero_word(uint32_t index, uint32_t word) {
+    if constexpr (MODE == LengthMode::Bit) {
+        return index * 32u + bitlength_word(word);
+    } else {
+        (void)word;
+        return index + 1u;
+    }
+}
+
+template<LengthMode MODE, int THREADS>
 __global__ void batch_bitlength_thread_kernel(
     const uint32_t * A,
     uint32_t * result,
@@ -35,7 +50,7 @@ __global__ void batch_bitlength_thread_kernel(
             const uint32_t i = L - 1u - offset;
             const uint32_t word = row[i];
             if (word != 0u) {
-                local = i * 32u + bitlength_word(word);
+                local = measure_nonzero_word<MODE>(i, word);
                 break;
             }
         }
@@ -44,6 +59,7 @@ __global__ void batch_bitlength_thread_kernel(
     atomicMax(result, local_max);
 }
 
+template<LengthMode MODE>
 __global__ void batch_bitlength_warp_kernel(
     const uint32_t * A,
     uint32_t * result,
@@ -67,7 +83,7 @@ __global__ void batch_bitlength_warp_kernel(
             if (mask != 0u) {
                 const uint32_t top_lane = 31u - (uint32_t)__clz(mask);
                 if (lane == top_lane) {
-                    local = i * 32u + bitlength_word(word);
+                    local = measure_nonzero_word<MODE>(i, word);
                 }
                 break;
             }
@@ -82,7 +98,7 @@ __global__ void batch_bitlength_warp_kernel(
     }
 }
 
-template<int THREADS>
+template<LengthMode MODE, int THREADS>
 __global__ void batch_bitlength_chunk_kernel(
     const uint32_t * A,
     uint32_t * result,
@@ -108,24 +124,24 @@ __global__ void batch_bitlength_chunk_kernel(
         for (uint32_t i = chunk_start + threadIdx.x * 4u; i < chunk_end; i += THREADS * 4u) {
             const uint32_t w0 = row[i];
             if (w0 != 0u) {
-                local_best = max(local_best, i * 32u + bitlength_word(w0));
+                local_best = max(local_best, measure_nonzero_word<MODE>(i, w0));
             }
             if (i + 1u < chunk_end) {
                 const uint32_t w1 = row[i + 1u];
                 if (w1 != 0u) {
-                    local_best = max(local_best, (i + 1u) * 32u + bitlength_word(w1));
+                    local_best = max(local_best, measure_nonzero_word<MODE>(i + 1u, w1));
                 }
             }
             if (i + 2u < chunk_end) {
                 const uint32_t w2 = row[i + 2u];
                 if (w2 != 0u) {
-                    local_best = max(local_best, (i + 2u) * 32u + bitlength_word(w2));
+                    local_best = max(local_best, measure_nonzero_word<MODE>(i + 2u, w2));
                 }
             }
             if (i + 3u < chunk_end) {
                 const uint32_t w3 = row[i + 3u];
                 if (w3 != 0u) {
-                    local_best = max(local_best, (i + 3u) * 32u + bitlength_word(w3));
+                    local_best = max(local_best, measure_nonzero_word<MODE>(i + 3u, w3));
                 }
             }
         }
@@ -154,7 +170,8 @@ size_t batch_bitlength_workspace_size(uint32_t N, uint32_t L) {
     return 0;
 }
 
-uint32_t batch_bitlength_max(
+template<LengthMode MODE>
+uint32_t batch_length_max_impl(
     const uint32_t * A,
     uint32_t * workspace,
     uint32_t N,
@@ -172,13 +189,13 @@ uint32_t batch_bitlength_max(
     if (L <= kSmallLThreadThreshold) {
         const int threads_per_block = 128;
         const int num_blocks = std::min<uint32_t>((N + threads_per_block - 1u) / threads_per_block, 65535u);
-        batch_bitlength_thread_kernel<128><<<num_blocks, threads_per_block>>>(
+        batch_bitlength_thread_kernel<MODE, 128><<<num_blocks, threads_per_block>>>(
             A, d_result, N, L, stride_A
         );
     } else if (L < kLargeLThreshold || N >= kSmallNThreshold || workspace == nullptr) {
         const uint32_t warps_per_block = 8u;
         const uint32_t num_blocks = std::min<uint32_t>((N + warps_per_block - 1u) / warps_per_block, 65535u);
-        batch_bitlength_warp_kernel<<<num_blocks, dim3(32u, warps_per_block, 1u)>>>(
+        batch_bitlength_warp_kernel<MODE><<<num_blocks, dim3(32u, warps_per_block, 1u)>>>(
             A, d_result, N, L, stride_A
         );
     } else {
@@ -186,7 +203,7 @@ uint32_t batch_bitlength_max(
         const uint32_t num_blocks_x_limit = std::max<uint32_t>(256u, 65535u / std::max<uint32_t>(N, 1u));
         const uint32_t num_blocks_x = std::min<uint32_t>(num_blocks_x_limit, std::max<uint32_t>(1u, chunk_count));
         const uint32_t num_blocks_y = std::min<uint32_t>(N, std::max<uint32_t>(1u, 65535u / num_blocks_x));
-        batch_bitlength_chunk_kernel<256><<<dim3(num_blocks_x, num_blocks_y, 1u), 256>>>(
+        batch_bitlength_chunk_kernel<MODE, 256><<<dim3(num_blocks_x, num_blocks_y, 1u), 256>>>(
             A, d_result, N, L, stride_A
         );
     }
@@ -195,4 +212,24 @@ uint32_t batch_bitlength_max(
     cudaMemcpy(&h_result, d_result, sizeof(uint32_t), cudaMemcpyDeviceToHost);
     cudaFree(d_result);
     return h_result;
+}
+
+uint32_t batch_bitlength_max(
+    const uint32_t * A,
+    uint32_t * workspace,
+    uint32_t N,
+    uint32_t L,
+    uint32_t stride_A
+) {
+    return batch_length_max_impl<LengthMode::Bit>(A, workspace, N, L, stride_A);
+}
+
+uint32_t batch_limblength_max(
+    const uint32_t * A,
+    uint32_t * workspace,
+    uint32_t N,
+    uint32_t L,
+    uint32_t stride_A
+) {
+    return batch_length_max_impl<LengthMode::Limb>(A, workspace, N, L, stride_A);
 }

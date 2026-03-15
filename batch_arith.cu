@@ -320,13 +320,28 @@ cudaError_t batch_mp_bitlength_max(BatchMPContext *ctx, BatchMPArray A, uint32_t
     return cudaGetLastError();
 }
 
-cudaError_t BatchMPArray::compact(BatchMPContext *ctx) {
-    uint32_t bitlength = 0u;
-    cudaError_t err = batch_mp_bitlength_max(ctx, *this, &bitlength);
+cudaError_t batch_mp_limblength_max(BatchMPContext *ctx, BatchMPArray A, uint32_t *result) {
+    if (ctx == nullptr || !valid_array(A) || result == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    const size_t workspace_size = batch_bitlength_workspace_size(A.batch_size, A.length);
+    cudaError_t err = ensure_workspace(ctx, workspace_size);
     if (err != cudaSuccess) {
         return err;
     }
 
-    length = (bitlength + 31u) / 32u;
+    *result = batch_limblength_max(A.data, ctx->workspace, A.batch_size, A.length, A.stride);
+    return cudaGetLastError();
+}
+
+cudaError_t BatchMPArray::compact(BatchMPContext *ctx) {
+    uint32_t limblength = 0u;
+    cudaError_t err = batch_mp_limblength_max(ctx, *this, &limblength);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    length = limblength;
     return cudaSuccess;
 }

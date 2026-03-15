@@ -99,6 +99,16 @@ uint32_t gmp_bitlength(const uint32_t * words, uint32_t L) {
     return bits;
 }
 
+uint32_t host_limblength(const uint32_t * words, uint32_t L) {
+    for (uint32_t offset = 0; offset < L; ++offset) {
+        const uint32_t i = L - 1u - offset;
+        if (words[i] != 0u) {
+            return i + 1u;
+        }
+    }
+    return 0u;
+}
+
 void fill_input_device(
     uint32_t * d_words,
     uint32_t N,
@@ -175,18 +185,26 @@ bool test_configuration(
     CUDA_CHECK(cudaMemcpy(h_A.data(), d_A, size_A, cudaMemcpyDeviceToHost));
 
     uint32_t expected = 0u;
+    uint32_t expected_limbs = 0u;
     for (uint32_t i = 0; i < N; ++i) {
         expected = std::max(expected, gmp_bitlength(h_A.data() + (size_t)i * stride, L));
+        expected_limbs = std::max(expected_limbs, host_limblength(h_A.data() + (size_t)i * stride, L));
     }
 
     const uint32_t actual = batch_bitlength_max(d_A, d_workspace, N, L, stride);
+    const uint32_t actual_limbs = batch_limblength_max(d_A, d_workspace, N, L, stride);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(h_A.data(), d_A, size_A, cudaMemcpyDeviceToHost));
 
-    bool pass = (actual == expected);
+    bool pass = (actual == expected) && (actual_limbs == expected_limbs);
     if (!pass && verbose) {
-        printf("  Bitlength mismatch: expected=%u actual=%u\n", expected, actual);
+        if (actual != expected) {
+            printf("  Bitlength mismatch: expected=%u actual=%u\n", expected, actual);
+        }
+        if (actual_limbs != expected_limbs) {
+            printf("  Limblength mismatch: expected=%u actual=%u\n", expected_limbs, actual_limbs);
+        }
     }
     if (pass && !verify_padding(h_A, N, L, stride)) {
         pass = false;

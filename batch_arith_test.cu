@@ -580,22 +580,36 @@ bool test_bitlength_and_compact(BatchMPContext *ctx) {
     CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     uint32_t got = 0u;
+    uint32_t got_limbs = 0u;
     printf("Running bitlength N=%u L=%u\n", A.array.batch_size, A.array.length);
     CUDA_CHECK(batch_mp_bitlength_max(ctx, A.array, &got));
+    CUDA_CHECK(batch_mp_limblength_max(ctx, A.array, &got_limbs));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     uint32_t expected = 0u;
+    uint32_t expected_limbs = 0u;
     for (uint32_t i = 0; i < A.array.batch_size; ++i) {
         mpz_t value;
         mpz_init(value);
         words_to_mpz(value, h_A.data() + (size_t)i * A.array.stride, A.array.length);
         const uint32_t bits = (mpz_sgn(value) == 0) ? 0u : (uint32_t)mpz_sizeinbase(value, 2);
         expected = std::max(expected, bits);
+        for (uint32_t offset = 0; offset < A.array.length; ++offset) {
+            const uint32_t limb = A.array.length - 1u - offset;
+            if (h_A[(size_t)i * A.array.stride + limb] != 0u) {
+                expected_limbs = std::max(expected_limbs, limb + 1u);
+                break;
+            }
+        }
         mpz_clear(value);
     }
 
     if (got != expected) {
         fprintf(stderr, "Bitlength mismatch: expected=%u got=%u\n", expected, got);
+        return false;
+    }
+    if (got_limbs != expected_limbs) {
+        fprintf(stderr, "Limblength mismatch: expected=%u got=%u\n", expected_limbs, got_limbs);
         return false;
     }
 
@@ -613,6 +627,14 @@ bool test_bitlength_and_compact(BatchMPContext *ctx) {
     h_B[(size_t)2 * B.array.stride + 5] = 0x00000001u;
     CUDA_CHECK(cudaMemcpy(B.array.data, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
+    uint32_t small_limbs = 0u;
+    CUDA_CHECK(batch_mp_limblength_max(ctx, B.array, &small_limbs));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    if (small_limbs != 6u) {
+        fprintf(stderr, "Limblength computed wrong length: expected=6 got=%u\n", small_limbs);
+        return false;
+    }
+
     BatchMPArray compacted_small = B.array;
     CUDA_CHECK(compacted_small.compact(ctx));
     if (compacted_small.length != 6u) {
@@ -626,6 +648,10 @@ bool test_bitlength_and_compact(BatchMPContext *ctx) {
     invalid_array.stride = 3;
     if (batch_mp_bitlength_max(ctx, invalid_array, &got) != cudaErrorInvalidValue) {
         fprintf(stderr, "Expected invalid array metadata to fail in bitlength\n");
+        return false;
+    }
+    if (batch_mp_limblength_max(ctx, invalid_array, &got_limbs) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected invalid array metadata to fail in limblength\n");
         return false;
     }
 
