@@ -7,6 +7,7 @@
 #include "batch_bitlength.h"
 #include "batch_mul_naive.h"
 #include "batch_mul_ntt.h"
+#include "batch_mul_small.h"
 #include "batch_shift.h"
 #include "batch_sub.h"
 #include "batch_sub_small.h"
@@ -183,6 +184,27 @@ cudaError_t batch_mp_mul(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, Ba
     batch_mul_ntt(
         A.data, B.data, C.data, ctx->workspace, ctx->ntt_tables,
         A.batch_size, A.length, B.length, A.stride, B.stride, C.stride
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_mul_small(BatchMPContext *ctx, BatchMPArray A, uint32_t B, BatchMPArray C) {
+    if (ctx == nullptr || !valid_array(A) || !valid_array(C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (!same_batch(A, C)) {
+        return cudaErrorInvalidValue;
+    }
+
+    const size_t workspace_size = batch_mul_small_workspace_size(A.batch_size, A.length, C.length);
+    cudaError_t err = ensure_workspace(ctx, workspace_size);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    batch_mul_small(
+        A.data, B, C.data, ctx->workspace,
+        A.batch_size, A.length, C.length, A.stride, C.stride
     );
     return cudaGetLastError();
 }

@@ -38,11 +38,16 @@ def trim_prec_quotient(*args, prec_bits):
     return args
 
 def reduce_gcd_quotient(a, b):
-    ga = a
-    gb = b
-    while ga != 0:
-        ga, gb = gb % ga, ga
-    return a // gb, b // gb
+    # ga = a
+    # gb = b
+    # while ga != 0:
+    #     ga, gb = gb % ga, ga
+    # return a // gb, b // gb
+    for factor in [3, 5, 23, 29]:
+        if a % factor == 0 and b % factor == 0:
+            a = a // factor
+            b = b // factor
+    return a, b
 
 def binary_split(i, j, is_initial = False):
     if j == i + 1:

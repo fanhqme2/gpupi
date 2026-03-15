@@ -48,6 +48,15 @@ cudaError_t batch_mp_mul(
     BatchMPArray C
 );
 
+// Multiply N large integers by one host-side single-limb integer and write the truncated result into C.
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch.
+cudaError_t batch_mp_mul_small(
+    BatchMPContext * ctx,
+    BatchMPArray A,
+    uint32_t B,
+    BatchMPArray C
+);
+
 // Add N pairs of large integers and write the truncated result into C.
 // Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_add(
