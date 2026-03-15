@@ -12,6 +12,8 @@
 // If L_c is smaller, the high part is truncated.
 // A, B, C, and workspace are device pointers.
 // We must have L_a <= stride_A, L_b <= stride_B, L_c <= stride_C.
+// In-place operation is supported when C == A or C == B, provided the
+// aliased operand uses the same length and stride as C.
 // workspace must be at least batch_add_simple_workspace_size(...) bytes
 // when the returned size is non-zero.
 void batch_add_simple(

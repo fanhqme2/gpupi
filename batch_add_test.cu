@@ -394,6 +394,84 @@ bool test_configuration(
     return pass;
 }
 
+bool test_inplace_configuration(
+    uint32_t N,
+    uint32_t L,
+    std::mt19937_64 & rng,
+    bool verbose = false
+) {
+    if (verbose) {
+        printf("Testing in-place operation N=%u, L=%u...\n", N, L);
+    }
+
+    std::vector<uint32_t> h_A((size_t)N * L);
+    std::vector<uint32_t> h_B((size_t)N * L);
+    fill_random_operand(h_A, N, L, L, kInputPadPatternA, rng);
+    fill_random_operand(h_B, N, L, L, kInputPadPatternB, rng);
+
+    std::vector<uint32_t> expected((size_t)N * L, 0u);
+    for (uint32_t row = 0; row < N; ++row) {
+        uint64_t carry = 0;
+        for (uint32_t i = 0; i < L; ++i) {
+            const uint64_t a = h_A[(size_t)row * L + i];
+            const uint64_t b = h_B[(size_t)row * L + i];
+            const uint64_t sum = a + b + carry;
+            expected[(size_t)row * L + i] = (uint32_t)sum;
+            carry = sum >> 32;
+        }
+    }
+
+    const size_t size_bytes = h_A.size() * sizeof(uint32_t);
+    const size_t workspace_size = batch_add_simple_workspace_size(N, L, L, L);
+    bool pass = true;
+
+    for (int alias_mode = 0; alias_mode < 2 && pass; ++alias_mode) {
+        uint32_t * d_A = nullptr;
+        uint32_t * d_B = nullptr;
+        uint32_t * d_workspace = nullptr;
+        std::vector<uint32_t> actual((size_t)N * L);
+
+        CUDA_CHECK(cudaMalloc(&d_A, size_bytes));
+        CUDA_CHECK(cudaMalloc(&d_B, size_bytes));
+        if (workspace_size > 0) {
+            CUDA_CHECK(cudaMalloc(&d_workspace, workspace_size));
+        }
+
+        CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), size_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), size_bytes, cudaMemcpyHostToDevice));
+
+        uint32_t * d_C = (alias_mode == 0) ? d_A : d_B;
+        batch_add_simple(d_A, d_B, d_C, d_workspace, N, L, L, L, L, L, L);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(actual.data(), d_C, size_bytes, cudaMemcpyDeviceToHost));
+
+        for (uint32_t row = 0; row < N && pass; ++row) {
+            for (uint32_t i = 0; i < L; ++i) {
+                const uint32_t got = actual[(size_t)row * L + i];
+                const uint32_t exp = expected[(size_t)row * L + i];
+                if (got != exp) {
+                    pass = false;
+                    if (verbose) {
+                        printf("  In-place mismatch for C == %s at row %u word %u: expected=%08x actual=%08x\n",
+                               alias_mode == 0 ? "A" : "B", row, i, exp, got);
+                    }
+                    break;
+                }
+            }
+        }
+
+        CUDA_CHECK(cudaFree(d_A));
+        CUDA_CHECK(cudaFree(d_B));
+        if (d_workspace) CUDA_CHECK(cudaFree(d_workspace));
+    }
+
+    if (verbose) {
+        printf("  %s\n", pass ? "PASSED" : "FAILED");
+    }
+    return pass;
+}
+
 void benchmark_configuration(
     uint32_t L_a,
     uint32_t L_b,
@@ -572,6 +650,10 @@ int main(int argc, char **argv) {
     }
 
     if (all_passed && !test_long_carry_chain_case(true)) {
+        all_passed = false;
+    }
+
+    if (all_passed && !test_inplace_configuration(7, 4097, rng, true)) {
         all_passed = false;
     }
 
