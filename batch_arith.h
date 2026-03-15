@@ -7,6 +7,27 @@
 
 struct BatchMPContext;
 
+struct BatchMPArray {
+    uint32_t *data;
+    uint32_t length;
+    uint32_t batch_size;
+    uint32_t stride;
+
+    cudaError_t compact(BatchMPContext * ctx);
+};
+
+// Allocate device storage for batch_size values with the given stride.
+// If stride is zero, length is used as the stride.
+// On failure, the returned array has data == nullptr.
+BatchMPArray batch_mp_array_create(
+    uint32_t batch_size,
+    uint32_t length,
+    uint32_t stride = 0
+);
+
+// Release the device storage owned by the array and reset its fields to zero.
+void batch_mp_array_release(BatchMPArray array);
+
 // Allocate and initialize precomputed tables used by batch arithmetic kernels.
 // Returns nullptr on allocation or initialization failure.
 BatchMPContext * batch_mp_init();
@@ -19,69 +40,44 @@ size_t batch_mp_workspace_size(const BatchMPContext * ctx);
 
 // Multiply N pairs of large integers.
 // Uses the naive kernel when L_a + L_b <= 1024, otherwise uses the NTT kernel.
-// Returns a CUDA error code for context growth or launch validation failures.
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch or if C.length != A.length + B.length.
 cudaError_t batch_mp_mul(
     BatchMPContext * ctx,
-    uint32_t * A,
-    uint32_t * B,
-    uint32_t * ret,
-    uint32_t N,
-    uint32_t L_a,
-    uint32_t L_b,
-    uint32_t stride_A,
-    uint32_t stride_B,
-    uint32_t stride_ret
+    BatchMPArray A,
+    BatchMPArray B,
+    BatchMPArray C
 );
 
 // Add N pairs of large integers and write the truncated result into C.
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_add(
     BatchMPContext * ctx,
-    uint32_t * A,
-    uint32_t * B,
-    uint32_t * C,
-    uint32_t N,
-    uint32_t L_a,
-    uint32_t L_b,
-    uint32_t L_c,
-    uint32_t stride_A,
-    uint32_t stride_B,
-    uint32_t stride_C
+    BatchMPArray A,
+    BatchMPArray B,
+    BatchMPArray C
 );
 
-// Subtract N pairs of large integers modulo 2^(32 * L_c).
+// Subtract N pairs of large integers modulo 2^(32 * C.length).
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_sub(
     BatchMPContext * ctx,
-    uint32_t * A,
-    uint32_t * B,
-    uint32_t * C,
-    uint32_t N,
-    uint32_t L_a,
-    uint32_t L_b,
-    uint32_t L_c,
-    uint32_t stride_A,
-    uint32_t stride_B,
-    uint32_t stride_C
+    BatchMPArray A,
+    BatchMPArray B,
+    BatchMPArray C
 );
 
 // Shift N unsigned multi-limb integers by a signed bit count.
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_shift_bits(
     BatchMPContext * ctx,
-    const uint32_t * A,
-    uint32_t * B,
-    uint32_t N,
-    uint32_t L_in,
-    uint32_t L_out,
-    uint32_t stride_in,
-    uint32_t stride_out,
+    BatchMPArray A,
+    BatchMPArray B,
     int32_t shift_bits
 );
 
 // Compute the maximum bitlength among N large integers.
 cudaError_t batch_mp_bitlength_max(
     BatchMPContext * ctx,
-    const uint32_t * A,
-    uint32_t N,
-    uint32_t L,
-    uint32_t stride_A,
+    BatchMPArray A,
     uint32_t * result
 );

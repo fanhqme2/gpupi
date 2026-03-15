@@ -43,15 +43,22 @@ void words_to_mpz(mpz_t out, const uint32_t *words, size_t count) {
     mpz_import(out, count, -1, sizeof(uint32_t), 0, 0, words);
 }
 
-struct DeviceBuffer {
-    uint32_t *ptr = nullptr;
+struct ArrayOwner {
+    BatchMPArray array{};
 
-    ~DeviceBuffer() {
-        if (ptr != nullptr) {
-            cudaFree(ptr);
-        }
+    ~ArrayOwner() {
+        batch_mp_array_release(array);
     }
 };
+
+BatchMPArray make_array(uint32_t batch_size, uint32_t length, uint32_t stride = 0u) {
+    BatchMPArray array = batch_mp_array_create(batch_size, length, stride);
+    if (batch_size != 0u && array.data == nullptr) {
+        fprintf(stderr, "batch_mp_array_create failed\n");
+        exit(1);
+    }
+    return array;
+}
 
 bool test_mul(BatchMPContext *ctx) {
     struct CaseConfig {
@@ -70,37 +77,31 @@ bool test_mul(BatchMPContext *ctx) {
     size_t previous_workspace = batch_mp_workspace_size(ctx);
 
     for (const CaseConfig &cfg : cases) {
-        const uint32_t stride_A = cfg.L_a;
-        const uint32_t stride_B = cfg.L_b;
-        const uint32_t stride_ret = cfg.L_a + cfg.L_b;
+        ArrayOwner A{make_array(cfg.N, cfg.L_a)};
+        ArrayOwner B{make_array(cfg.N, cfg.L_b)};
+        ArrayOwner C{make_array(cfg.N, cfg.L_a + cfg.L_b)};
 
-        std::vector<uint32_t> h_A((size_t)cfg.N * stride_A);
-        std::vector<uint32_t> h_B((size_t)cfg.N * stride_B);
-        std::vector<uint32_t> h_ret((size_t)cfg.N * stride_ret, 0u);
-        fill_words(h_A, cfg.N, cfg.L_a, stride_A, 0x12345678u);
-        fill_words(h_B, cfg.N, cfg.L_b, stride_B, 0x87654321u);
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_B((size_t)cfg.N * B.array.stride);
+        std::vector<uint32_t> h_C((size_t)cfg.N * C.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_a, A.array.stride, 0x12345678u);
+        fill_words(h_B, cfg.N, cfg.L_b, B.array.stride, 0x87654321u);
 
-        DeviceBuffer d_A;
-        DeviceBuffer d_B;
-        DeviceBuffer d_ret;
-        CUDA_CHECK(cudaMalloc(&d_A.ptr, h_A.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_B.ptr, h_B.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_ret.ptr, h_ret.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMemcpy(d_A.ptr, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B.ptr, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(d_ret.ptr, 0, h_ret.size() * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(B.array.data, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(C.array.data, 0, h_C.size() * sizeof(uint32_t)));
 
         printf("Running mul %-18s N=%u L_a=%u L_b=%u\n", cfg.name, cfg.N, cfg.L_a, cfg.L_b);
-        CUDA_CHECK(batch_mp_mul(ctx, d_A.ptr, d_B.ptr, d_ret.ptr, cfg.N, cfg.L_a, cfg.L_b, stride_A, stride_B, stride_ret));
+        CUDA_CHECK(batch_mp_mul(ctx, A.array, B.array, C.array));
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_ret.data(), d_ret.ptr, h_ret.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_C.data(), C.array.data, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
         for (uint32_t i = 0; i < cfg.N; ++i) {
             mpz_t a, b, expected, got;
             mpz_inits(a, b, expected, got, NULL);
-            words_to_mpz(a, h_A.data() + (size_t)i * stride_A, cfg.L_a);
-            words_to_mpz(b, h_B.data() + (size_t)i * stride_B, cfg.L_b);
-            words_to_mpz(got, h_ret.data() + (size_t)i * stride_ret, stride_ret);
+            words_to_mpz(a, h_A.data() + (size_t)i * A.array.stride, cfg.L_a);
+            words_to_mpz(b, h_B.data() + (size_t)i * B.array.stride, cfg.L_b);
+            words_to_mpz(got, h_C.data() + (size_t)i * C.array.stride, C.array.length);
             mpz_mul(expected, a, b);
             if (mpz_cmp(expected, got) != 0) {
                 fprintf(stderr, "Multiply mismatch in case %s at batch index %u\n", cfg.name, i);
@@ -123,6 +124,21 @@ bool test_mul(BatchMPContext *ctx) {
         previous_workspace = workspace_after;
     }
 
+    ArrayOwner A{make_array(2, 10)};
+    ArrayOwner B{make_array(3, 8)};
+    ArrayOwner C{make_array(2, 18)};
+    if (batch_mp_mul(ctx, A.array, B.array, C.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in multiply\n");
+        return false;
+    }
+
+    ArrayOwner WrongC{make_array(2, 17)};
+    ArrayOwner MatchB{make_array(2, 8)};
+    if (batch_mp_mul(ctx, A.array, MatchB.array, WrongC.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected output length mismatch to fail in multiply\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -143,37 +159,31 @@ bool test_add(BatchMPContext *ctx) {
     size_t previous_workspace = batch_mp_workspace_size(ctx);
 
     for (const CaseConfig &cfg : cases) {
-        const uint32_t stride_A = cfg.L_a;
-        const uint32_t stride_B = cfg.L_b;
-        const uint32_t stride_C = cfg.L_c;
+        ArrayOwner A{make_array(cfg.N, cfg.L_a)};
+        ArrayOwner B{make_array(cfg.N, cfg.L_b)};
+        ArrayOwner C{make_array(cfg.N, cfg.L_c)};
 
-        std::vector<uint32_t> h_A((size_t)cfg.N * stride_A);
-        std::vector<uint32_t> h_B((size_t)cfg.N * stride_B);
-        std::vector<uint32_t> h_C((size_t)cfg.N * stride_C, 0u);
-        fill_words(h_A, cfg.N, cfg.L_a, stride_A, 0xABCDEF01u);
-        fill_words(h_B, cfg.N, cfg.L_b, stride_B, 0x10FEDCBAu);
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_B((size_t)cfg.N * B.array.stride);
+        std::vector<uint32_t> h_C((size_t)cfg.N * C.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_a, A.array.stride, 0xABCDEF01u);
+        fill_words(h_B, cfg.N, cfg.L_b, B.array.stride, 0x10FEDCBAu);
 
-        DeviceBuffer d_A;
-        DeviceBuffer d_B;
-        DeviceBuffer d_C;
-        CUDA_CHECK(cudaMalloc(&d_A.ptr, h_A.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_B.ptr, h_B.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_C.ptr, h_C.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMemcpy(d_A.ptr, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B.ptr, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(d_C.ptr, 0, h_C.size() * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(B.array.data, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(C.array.data, 0, h_C.size() * sizeof(uint32_t)));
 
         printf("Running add %-18s N=%u L_a=%u L_b=%u L_c=%u\n", cfg.name, cfg.N, cfg.L_a, cfg.L_b, cfg.L_c);
-        CUDA_CHECK(batch_mp_add(ctx, d_A.ptr, d_B.ptr, d_C.ptr, cfg.N, cfg.L_a, cfg.L_b, cfg.L_c, stride_A, stride_B, stride_C));
+        CUDA_CHECK(batch_mp_add(ctx, A.array, B.array, C.array));
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_C.data(), d_C.ptr, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_C.data(), C.array.data, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
         for (uint32_t i = 0; i < cfg.N; ++i) {
             mpz_t a, b, expected, got;
             mpz_inits(a, b, expected, got, NULL);
-            words_to_mpz(a, h_A.data() + (size_t)i * stride_A, cfg.L_a);
-            words_to_mpz(b, h_B.data() + (size_t)i * stride_B, cfg.L_b);
-            words_to_mpz(got, h_C.data() + (size_t)i * stride_C, cfg.L_c);
+            words_to_mpz(a, h_A.data() + (size_t)i * A.array.stride, cfg.L_a);
+            words_to_mpz(b, h_B.data() + (size_t)i * B.array.stride, cfg.L_b);
+            words_to_mpz(got, h_C.data() + (size_t)i * C.array.stride, cfg.L_c);
             mpz_add(expected, a, b);
             mpz_fdiv_r_2exp(expected, expected, (mp_bitcnt_t)cfg.L_c * 32u);
             if (mpz_cmp(expected, got) != 0) {
@@ -197,6 +207,14 @@ bool test_add(BatchMPContext *ctx) {
         previous_workspace = workspace_after;
     }
 
+    ArrayOwner BadAddA{make_array(2, 4)};
+    ArrayOwner BadAddB{make_array(3, 4)};
+    ArrayOwner BadAddC{make_array(2, 5)};
+    if (batch_mp_add(ctx, BadAddA.array, BadAddB.array, BadAddC.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in addition\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -217,37 +235,31 @@ bool test_sub(BatchMPContext *ctx) {
     size_t previous_workspace = batch_mp_workspace_size(ctx);
 
     for (const CaseConfig &cfg : cases) {
-        const uint32_t stride_A = cfg.L_a;
-        const uint32_t stride_B = cfg.L_b;
-        const uint32_t stride_C = cfg.L_c;
+        ArrayOwner A{make_array(cfg.N, cfg.L_a)};
+        ArrayOwner B{make_array(cfg.N, cfg.L_b)};
+        ArrayOwner C{make_array(cfg.N, cfg.L_c)};
 
-        std::vector<uint32_t> h_A((size_t)cfg.N * stride_A);
-        std::vector<uint32_t> h_B((size_t)cfg.N * stride_B);
-        std::vector<uint32_t> h_C((size_t)cfg.N * stride_C, 0u);
-        fill_words(h_A, cfg.N, cfg.L_a, stride_A, 0xCAFEBABEu);
-        fill_words(h_B, cfg.N, cfg.L_b, stride_B, 0x13572468u);
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_B((size_t)cfg.N * B.array.stride);
+        std::vector<uint32_t> h_C((size_t)cfg.N * C.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_a, A.array.stride, 0xCAFEBABEu);
+        fill_words(h_B, cfg.N, cfg.L_b, B.array.stride, 0x13572468u);
 
-        DeviceBuffer d_A;
-        DeviceBuffer d_B;
-        DeviceBuffer d_C;
-        CUDA_CHECK(cudaMalloc(&d_A.ptr, h_A.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_B.ptr, h_B.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_C.ptr, h_C.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMemcpy(d_A.ptr, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B.ptr, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(d_C.ptr, 0, h_C.size() * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(B.array.data, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(C.array.data, 0, h_C.size() * sizeof(uint32_t)));
 
         printf("Running sub %-18s N=%u L_a=%u L_b=%u L_c=%u\n", cfg.name, cfg.N, cfg.L_a, cfg.L_b, cfg.L_c);
-        CUDA_CHECK(batch_mp_sub(ctx, d_A.ptr, d_B.ptr, d_C.ptr, cfg.N, cfg.L_a, cfg.L_b, cfg.L_c, stride_A, stride_B, stride_C));
+        CUDA_CHECK(batch_mp_sub(ctx, A.array, B.array, C.array));
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_C.data(), d_C.ptr, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_C.data(), C.array.data, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
         for (uint32_t i = 0; i < cfg.N; ++i) {
             mpz_t a, b, expected, got;
             mpz_inits(a, b, expected, got, NULL);
-            words_to_mpz(a, h_A.data() + (size_t)i * stride_A, cfg.L_a);
-            words_to_mpz(b, h_B.data() + (size_t)i * stride_B, cfg.L_b);
-            words_to_mpz(got, h_C.data() + (size_t)i * stride_C, cfg.L_c);
+            words_to_mpz(a, h_A.data() + (size_t)i * A.array.stride, cfg.L_a);
+            words_to_mpz(b, h_B.data() + (size_t)i * B.array.stride, cfg.L_b);
+            words_to_mpz(got, h_C.data() + (size_t)i * C.array.stride, cfg.L_c);
             mpz_sub(expected, a, b);
             mpz_fdiv_r_2exp(expected, expected, (mp_bitcnt_t)cfg.L_c * 32u);
             if (mpz_cmp(expected, got) != 0) {
@@ -271,6 +283,14 @@ bool test_sub(BatchMPContext *ctx) {
         previous_workspace = workspace_after;
     }
 
+    ArrayOwner BadSubA{make_array(2, 4)};
+    ArrayOwner BadSubB{make_array(3, 4)};
+    ArrayOwner BadSubC{make_array(2, 5)};
+    if (batch_mp_sub(ctx, BadSubA.array, BadSubB.array, BadSubC.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in subtraction\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -289,35 +309,31 @@ bool test_shift(BatchMPContext *ctx) {
     };
 
     for (const CaseConfig &cfg : cases) {
-        const uint32_t stride_in = cfg.L_in;
-        const uint32_t stride_out = cfg.L_out;
-        std::vector<uint32_t> h_A((size_t)cfg.N * stride_in);
-        std::vector<uint32_t> h_B((size_t)cfg.N * stride_out, 0u);
-        fill_words(h_A, cfg.N, cfg.L_in, stride_in, 0x2468ACE1u);
+        ArrayOwner A{make_array(cfg.N, cfg.L_in)};
+        ArrayOwner B{make_array(cfg.N, cfg.L_out)};
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_B((size_t)cfg.N * B.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_in, A.array.stride, 0x2468ACE1u);
 
-        DeviceBuffer d_A;
-        DeviceBuffer d_B;
-        CUDA_CHECK(cudaMalloc(&d_A.ptr, h_A.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc(&d_B.ptr, h_B.size() * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMemcpy(d_A.ptr, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(d_B.ptr, 0, h_B.size() * sizeof(uint32_t)));
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(B.array.data, 0, h_B.size() * sizeof(uint32_t)));
 
         printf("Running shift %-16s N=%u L_in=%u L_out=%u shift=%d\n", cfg.name, cfg.N, cfg.L_in, cfg.L_out, cfg.shift_bits);
-        CUDA_CHECK(batch_mp_shift_bits(ctx, d_A.ptr, d_B.ptr, cfg.N, cfg.L_in, cfg.L_out, stride_in, stride_out, cfg.shift_bits));
+        CUDA_CHECK(batch_mp_shift_bits(ctx, A.array, B.array, cfg.shift_bits));
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_B.data(), d_B.ptr, h_B.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_B.data(), B.array.data, h_B.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
         for (uint32_t i = 0; i < cfg.N; ++i) {
             mpz_t input, expected, got;
             mpz_inits(input, expected, got, NULL);
-            words_to_mpz(input, h_A.data() + (size_t)i * stride_in, cfg.L_in);
+            words_to_mpz(input, h_A.data() + (size_t)i * A.array.stride, cfg.L_in);
             if (cfg.shift_bits >= 0) {
                 mpz_mul_2exp(expected, input, (mp_bitcnt_t)cfg.shift_bits);
             } else {
                 mpz_fdiv_q_2exp(expected, input, (mp_bitcnt_t)(-cfg.shift_bits));
             }
             mpz_fdiv_r_2exp(expected, expected, (mp_bitcnt_t)cfg.L_out * 32u);
-            words_to_mpz(got, h_B.data() + (size_t)i * stride_out, cfg.L_out);
+            words_to_mpz(got, h_B.data() + (size_t)i * B.array.stride, cfg.L_out);
             if (mpz_cmp(expected, got) != 0) {
                 fprintf(stderr, "Shift mismatch in case %s at batch index %u\n", cfg.name, i);
                 mpz_clears(input, expected, got, NULL);
@@ -327,34 +343,37 @@ bool test_shift(BatchMPContext *ctx) {
         }
     }
 
+    ArrayOwner BadShiftA{make_array(2, 4)};
+    ArrayOwner BadShiftB{make_array(3, 4)};
+    if (batch_mp_shift_bits(ctx, BadShiftA.array, BadShiftB.array, 7) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in shift\n");
+        return false;
+    }
+
     return true;
 }
 
-bool test_bitlength(BatchMPContext *ctx) {
-    const uint32_t N = 4;
-    const uint32_t L = 20;
-    const uint32_t stride_A = L;
-    std::vector<uint32_t> h_A((size_t)N * stride_A, 0u);
+bool test_bitlength_and_compact(BatchMPContext *ctx) {
+    ArrayOwner A{make_array(4, 20, 24)};
+    std::vector<uint32_t> h_A((size_t)A.array.batch_size * A.array.stride, 0u);
 
     h_A[0] = 0u;
-    h_A[(size_t)1 * stride_A + 0] = 1u;
-    h_A[(size_t)2 * stride_A + 7] = 0x00008000u;
-    h_A[(size_t)3 * stride_A + 19] = 0x80000000u;
+    h_A[(size_t)1 * A.array.stride + 0] = 1u;
+    h_A[(size_t)2 * A.array.stride + 7] = 0x00008000u;
+    h_A[(size_t)3 * A.array.stride + 19] = 0x80000000u;
 
-    DeviceBuffer d_A;
-    CUDA_CHECK(cudaMalloc(&d_A.ptr, h_A.size() * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemcpy(d_A.ptr, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     uint32_t got = 0u;
-    printf("Running bitlength N=%u L=%u\n", N, L);
-    CUDA_CHECK(batch_mp_bitlength_max(ctx, d_A.ptr, N, L, stride_A, &got));
+    printf("Running bitlength N=%u L=%u\n", A.array.batch_size, A.array.length);
+    CUDA_CHECK(batch_mp_bitlength_max(ctx, A.array, &got));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     uint32_t expected = 0u;
-    for (uint32_t i = 0; i < N; ++i) {
+    for (uint32_t i = 0; i < A.array.batch_size; ++i) {
         mpz_t value;
         mpz_init(value);
-        words_to_mpz(value, h_A.data() + (size_t)i * stride_A, L);
+        words_to_mpz(value, h_A.data() + (size_t)i * A.array.stride, A.array.length);
         const uint32_t bits = (mpz_sgn(value) == 0) ? 0u : (uint32_t)mpz_sizeinbase(value, 2);
         expected = std::max(expected, bits);
         mpz_clear(value);
@@ -362,6 +381,36 @@ bool test_bitlength(BatchMPContext *ctx) {
 
     if (got != expected) {
         fprintf(stderr, "Bitlength mismatch: expected=%u got=%u\n", expected, got);
+        return false;
+    }
+
+    BatchMPArray compacted = A.array;
+    CUDA_CHECK(compacted.compact(ctx));
+    if (compacted.length != 20u) {
+        fprintf(stderr, "Compact changed length unexpectedly for full-width data: got=%u\n", compacted.length);
+        return false;
+    }
+
+    ArrayOwner B{make_array(3, 12, 16)};
+    std::vector<uint32_t> h_B((size_t)B.array.batch_size * B.array.stride, 0u);
+    h_B[(size_t)0 * B.array.stride + 1] = 0x00000001u;
+    h_B[(size_t)1 * B.array.stride + 4] = 0x7fffffffu;
+    h_B[(size_t)2 * B.array.stride + 5] = 0x00000001u;
+    CUDA_CHECK(cudaMemcpy(B.array.data, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+
+    BatchMPArray compacted_small = B.array;
+    CUDA_CHECK(compacted_small.compact(ctx));
+    if (compacted_small.length != 6u) {
+        fprintf(stderr, "Compact computed wrong length: expected=6 got=%u\n", compacted_small.length);
+        return false;
+    }
+
+    BatchMPArray invalid_array{};
+    invalid_array.length = 4;
+    invalid_array.batch_size = 2;
+    invalid_array.stride = 3;
+    if (batch_mp_bitlength_max(ctx, invalid_array, &got) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected invalid array metadata to fail in bitlength\n");
         return false;
     }
 
@@ -388,7 +437,7 @@ int main() {
     run_with_context(test_add);
     run_with_context(test_sub);
     run_with_context(test_shift);
-    run_with_context(test_bitlength);
+    run_with_context(test_bitlength_and_compact);
 
     printf("Summary: %s\n", ok ? "PASSED" : "FAILED");
     return ok ? 0 : 1;

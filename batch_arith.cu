@@ -5,9 +5,9 @@
 #include "batch_add.h"
 #include "batch_bitlength.h"
 #include "batch_mul_naive.h"
+#include "batch_mul_ntt.h"
 #include "batch_shift.h"
 #include "batch_sub.h"
-#include "batch_mul_ntt.h"
 
 struct BatchMPContext {
     NTTPrecomputedTables ntt_tables;
@@ -80,7 +80,47 @@ void release_context_buffers(BatchMPContext *ctx) {
     }
 }
 
+bool valid_array(BatchMPArray array) {
+    if (array.batch_size == 0) {
+        return array.length <= array.stride;
+    }
+    return array.data != nullptr && array.length <= array.stride;
+}
+
+bool same_batch(BatchMPArray a, BatchMPArray b) {
+    return a.batch_size == b.batch_size;
+}
+
 }  // namespace
+
+BatchMPArray batch_mp_array_create(uint32_t batch_size, uint32_t length, uint32_t stride) {
+    BatchMPArray array{};
+    array.length = length;
+    array.batch_size = batch_size;
+    array.stride = (stride == 0u) ? length : stride;
+    if (array.length > array.stride) {
+        array.stride = 0u;
+        array.length = 0u;
+        array.batch_size = 0u;
+        return array;
+    }
+
+    const size_t bytes = (size_t)array.batch_size * array.stride * sizeof(uint32_t);
+    if (bytes == 0u) {
+        return array;
+    }
+
+    if (cudaMalloc(&array.data, bytes) != cudaSuccess) {
+        array = {};
+    }
+    return array;
+}
+
+void batch_mp_array_release(BatchMPArray array) {
+    if (array.data != nullptr) {
+        cudaFree(array.data);
+    }
+}
 
 BatchMPContext * batch_mp_init() {
     BatchMPContext *ctx = new (std::nothrow) BatchMPContext{};
@@ -111,136 +151,116 @@ size_t batch_mp_workspace_size(const BatchMPContext *ctx) {
     return (ctx == nullptr) ? 0u : ctx->workspace_size_bytes;
 }
 
-cudaError_t batch_mp_mul(
-    BatchMPContext * ctx,
-    uint32_t * A,
-    uint32_t * B,
-    uint32_t * ret,
-    uint32_t N,
-    uint32_t L_a,
-    uint32_t L_b,
-    uint32_t stride_A,
-    uint32_t stride_B,
-    uint32_t stride_ret
-) {
-    if (ctx == nullptr || A == nullptr || B == nullptr || ret == nullptr) {
+cudaError_t batch_mp_mul(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, BatchMPArray C) {
+    if (ctx == nullptr || !valid_array(A) || !valid_array(B) || !valid_array(C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (!same_batch(A, B) || !same_batch(A, C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (C.length != A.length + B.length) {
         return cudaErrorInvalidValue;
     }
 
-    const size_t L = (size_t)L_a + (size_t)L_b;
+    const size_t L = (size_t)A.length + (size_t)B.length;
     if (L <= BATCH_MUL_NAIVE_L_MAX) {
         batch_mul_naive(
-            A, B, ret,
-            (int)N, (int)L_a, (int)L_b,
-            (int)stride_A, (int)stride_B, (int)stride_ret
+            A.data, B.data, C.data,
+            (int)A.batch_size, (int)A.length, (int)B.length,
+            (int)A.stride, (int)B.stride, (int)C.stride
         );
         return cudaGetLastError();
     }
 
-    const size_t workspace_size = batch_mul_ntt_workspace_size(N, L_a, L_b);
+    const size_t workspace_size = batch_mul_ntt_workspace_size(A.batch_size, A.length, B.length);
     cudaError_t err = ensure_workspace(ctx, workspace_size);
     if (err != cudaSuccess) {
         return err;
     }
 
     batch_mul_ntt(
-        A, B, ret, ctx->workspace, ctx->ntt_tables,
-        N, L_a, L_b, stride_A, stride_B, stride_ret
+        A.data, B.data, C.data, ctx->workspace, ctx->ntt_tables,
+        A.batch_size, A.length, B.length, A.stride, B.stride, C.stride
     );
     return cudaGetLastError();
 }
 
-cudaError_t batch_mp_add(
-    BatchMPContext * ctx,
-    uint32_t * A,
-    uint32_t * B,
-    uint32_t * C,
-    uint32_t N,
-    uint32_t L_a,
-    uint32_t L_b,
-    uint32_t L_c,
-    uint32_t stride_A,
-    uint32_t stride_B,
-    uint32_t stride_C
-) {
-    if (ctx == nullptr || A == nullptr || B == nullptr || C == nullptr) {
+cudaError_t batch_mp_add(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, BatchMPArray C) {
+    if (ctx == nullptr || !valid_array(A) || !valid_array(B) || !valid_array(C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (!same_batch(A, B) || !same_batch(A, C)) {
         return cudaErrorInvalidValue;
     }
 
-    const size_t workspace_size = batch_add_simple_workspace_size(N, L_a, L_b, L_c);
+    const size_t workspace_size = batch_add_simple_workspace_size(A.batch_size, A.length, B.length, C.length);
     cudaError_t err = ensure_workspace(ctx, workspace_size);
     if (err != cudaSuccess) {
         return err;
     }
 
-    batch_add_simple(A, B, C, ctx->workspace, N, L_a, L_b, L_c, stride_A, stride_B, stride_C);
+    batch_add_simple(
+        A.data, B.data, C.data, ctx->workspace,
+        A.batch_size, A.length, B.length, C.length, A.stride, B.stride, C.stride
+    );
     return cudaGetLastError();
 }
 
-cudaError_t batch_mp_sub(
-    BatchMPContext * ctx,
-    uint32_t * A,
-    uint32_t * B,
-    uint32_t * C,
-    uint32_t N,
-    uint32_t L_a,
-    uint32_t L_b,
-    uint32_t L_c,
-    uint32_t stride_A,
-    uint32_t stride_B,
-    uint32_t stride_C
-) {
-    if (ctx == nullptr || A == nullptr || B == nullptr || C == nullptr) {
+cudaError_t batch_mp_sub(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, BatchMPArray C) {
+    if (ctx == nullptr || !valid_array(A) || !valid_array(B) || !valid_array(C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (!same_batch(A, B) || !same_batch(A, C)) {
         return cudaErrorInvalidValue;
     }
 
-    const size_t workspace_size = batch_sub_simple_workspace_size(N, L_a, L_b, L_c);
+    const size_t workspace_size = batch_sub_simple_workspace_size(A.batch_size, A.length, B.length, C.length);
     cudaError_t err = ensure_workspace(ctx, workspace_size);
     if (err != cudaSuccess) {
         return err;
     }
 
-    batch_sub_simple(A, B, C, ctx->workspace, N, L_a, L_b, L_c, stride_A, stride_B, stride_C);
+    batch_sub_simple(
+        A.data, B.data, C.data, ctx->workspace,
+        A.batch_size, A.length, B.length, C.length, A.stride, B.stride, C.stride
+    );
     return cudaGetLastError();
 }
 
-cudaError_t batch_mp_shift_bits(
-    BatchMPContext * ctx,
-    const uint32_t * A,
-    uint32_t * B,
-    uint32_t N,
-    uint32_t L_in,
-    uint32_t L_out,
-    uint32_t stride_in,
-    uint32_t stride_out,
-    int32_t shift_bits
-) {
-    if (ctx == nullptr || A == nullptr || B == nullptr) {
+cudaError_t batch_mp_shift_bits(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, int32_t shift_bits) {
+    if (ctx == nullptr || !valid_array(A) || !valid_array(B)) {
+        return cudaErrorInvalidValue;
+    }
+    if (!same_batch(A, B)) {
         return cudaErrorInvalidValue;
     }
 
-    batch_shift_bits(A, B, N, L_in, L_out, stride_in, stride_out, shift_bits);
+    batch_shift_bits(A.data, B.data, A.batch_size, A.length, B.length, A.stride, B.stride, shift_bits);
     return cudaGetLastError();
 }
 
-cudaError_t batch_mp_bitlength_max(
-    BatchMPContext * ctx,
-    const uint32_t * A,
-    uint32_t N,
-    uint32_t L,
-    uint32_t stride_A,
-    uint32_t * result
-) {
-    if (ctx == nullptr || A == nullptr || result == nullptr) {
+cudaError_t batch_mp_bitlength_max(BatchMPContext *ctx, BatchMPArray A, uint32_t *result) {
+    if (ctx == nullptr || !valid_array(A) || result == nullptr) {
         return cudaErrorInvalidValue;
     }
 
-    const size_t workspace_size = batch_bitlength_workspace_size(N, L);
+    const size_t workspace_size = batch_bitlength_workspace_size(A.batch_size, A.length);
     cudaError_t err = ensure_workspace(ctx, workspace_size);
     if (err != cudaSuccess) {
         return err;
     }
 
-    *result = batch_bitlength_max(A, ctx->workspace, N, L, stride_A);
+    *result = batch_bitlength_max(A.data, ctx->workspace, A.batch_size, A.length, A.stride);
     return cudaGetLastError();
+}
+
+cudaError_t BatchMPArray::compact(BatchMPContext *ctx) {
+    uint32_t bitlength = 0u;
+    cudaError_t err = batch_mp_bitlength_max(ctx, *this, &bitlength);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    length = (bitlength + 31u) / 32u;
+    return cudaSuccess;
 }
