@@ -2,7 +2,18 @@
 
 #include <new>
 
+#include "batch_add.h"
+#include "batch_bitlength.h"
 #include "batch_mul_naive.h"
+#include "batch_shift.h"
+#include "batch_sub.h"
+#include "batch_mul_ntt.h"
+
+struct BatchMPContext {
+    NTTPrecomputedTables ntt_tables;
+    uint32_t *workspace;
+    size_t workspace_size_bytes;
+};
 
 namespace {
 
@@ -96,6 +107,10 @@ void batch_mp_destroy(BatchMPContext *ctx) {
     delete ctx;
 }
 
+size_t batch_mp_workspace_size(const BatchMPContext *ctx) {
+    return (ctx == nullptr) ? 0u : ctx->workspace_size_bytes;
+}
+
 cudaError_t batch_mp_mul(
     BatchMPContext * ctx,
     uint32_t * A,
@@ -132,5 +147,100 @@ cudaError_t batch_mp_mul(
         A, B, ret, ctx->workspace, ctx->ntt_tables,
         N, L_a, L_b, stride_A, stride_B, stride_ret
     );
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_add(
+    BatchMPContext * ctx,
+    uint32_t * A,
+    uint32_t * B,
+    uint32_t * C,
+    uint32_t N,
+    uint32_t L_a,
+    uint32_t L_b,
+    uint32_t L_c,
+    uint32_t stride_A,
+    uint32_t stride_B,
+    uint32_t stride_C
+) {
+    if (ctx == nullptr || A == nullptr || B == nullptr || C == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    const size_t workspace_size = batch_add_simple_workspace_size(N, L_a, L_b, L_c);
+    cudaError_t err = ensure_workspace(ctx, workspace_size);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    batch_add_simple(A, B, C, ctx->workspace, N, L_a, L_b, L_c, stride_A, stride_B, stride_C);
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_sub(
+    BatchMPContext * ctx,
+    uint32_t * A,
+    uint32_t * B,
+    uint32_t * C,
+    uint32_t N,
+    uint32_t L_a,
+    uint32_t L_b,
+    uint32_t L_c,
+    uint32_t stride_A,
+    uint32_t stride_B,
+    uint32_t stride_C
+) {
+    if (ctx == nullptr || A == nullptr || B == nullptr || C == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    const size_t workspace_size = batch_sub_simple_workspace_size(N, L_a, L_b, L_c);
+    cudaError_t err = ensure_workspace(ctx, workspace_size);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    batch_sub_simple(A, B, C, ctx->workspace, N, L_a, L_b, L_c, stride_A, stride_B, stride_C);
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_shift_bits(
+    BatchMPContext * ctx,
+    const uint32_t * A,
+    uint32_t * B,
+    uint32_t N,
+    uint32_t L_in,
+    uint32_t L_out,
+    uint32_t stride_in,
+    uint32_t stride_out,
+    int32_t shift_bits
+) {
+    if (ctx == nullptr || A == nullptr || B == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    batch_shift_bits(A, B, N, L_in, L_out, stride_in, stride_out, shift_bits);
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_bitlength_max(
+    BatchMPContext * ctx,
+    const uint32_t * A,
+    uint32_t N,
+    uint32_t L,
+    uint32_t stride_A,
+    uint32_t * result
+) {
+    if (ctx == nullptr || A == nullptr || result == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+
+    const size_t workspace_size = batch_bitlength_workspace_size(N, L);
+    cudaError_t err = ensure_workspace(ctx, workspace_size);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    *result = batch_bitlength_max(A, ctx->workspace, N, L, stride_A);
     return cudaGetLastError();
 }
