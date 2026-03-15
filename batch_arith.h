@@ -57,12 +57,30 @@ cudaError_t batch_mp_add(
     BatchMPArray C
 );
 
+// Add one host-side single-limb integer to N large integers and write the truncated result into C.
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch.
+cudaError_t batch_mp_add_small(
+    BatchMPContext * ctx,
+    BatchMPArray A,
+    uint32_t B,
+    BatchMPArray C
+);
+
 // Subtract N pairs of large integers modulo 2^(32 * C.length).
 // Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_sub(
     BatchMPContext * ctx,
     BatchMPArray A,
     BatchMPArray B,
+    BatchMPArray C
+);
+
+// Subtract one host-side single-limb integer from N large integers modulo 2^(32 * C.length).
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch.
+cudaError_t batch_mp_sub_small(
+    BatchMPContext * ctx,
+    BatchMPArray A,
+    uint32_t B,
     BatchMPArray C
 );
 

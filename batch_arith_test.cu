@@ -218,6 +218,78 @@ bool test_add(BatchMPContext *ctx) {
     return true;
 }
 
+bool test_add_small(BatchMPContext *ctx) {
+    struct CaseConfig {
+        const char *name;
+        uint32_t N;
+        uint32_t L_a;
+        uint32_t L_c;
+        uint32_t B;
+    };
+
+    const CaseConfig cases[] = {
+        {"small", 7, 13, 15, 0x12345678u},
+        {"workspace", 2, 5000, 5002, 0xFEDCBA98u},
+    };
+
+    size_t previous_workspace = batch_mp_workspace_size(ctx);
+
+    for (const CaseConfig &cfg : cases) {
+        ArrayOwner A{make_array(cfg.N, cfg.L_a)};
+        ArrayOwner C{make_array(cfg.N, cfg.L_c)};
+
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_C((size_t)cfg.N * C.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_a, A.array.stride, 0x31415926u);
+
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(C.array.data, 0, h_C.size() * sizeof(uint32_t)));
+
+        printf("Running add_small %-12s N=%u L_a=%u L_c=%u B=%08x\n",
+               cfg.name, cfg.N, cfg.L_a, cfg.L_c, cfg.B);
+        CUDA_CHECK(batch_mp_add_small(ctx, A.array, cfg.B, C.array));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(h_C.data(), C.array.data, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+        for (uint32_t i = 0; i < cfg.N; ++i) {
+            mpz_t a, expected, got;
+            mpz_inits(a, expected, got, NULL);
+            words_to_mpz(a, h_A.data() + (size_t)i * A.array.stride, cfg.L_a);
+            words_to_mpz(got, h_C.data() + (size_t)i * C.array.stride, cfg.L_c);
+            mpz_set(expected, a);
+            mpz_add_ui(expected, expected, (unsigned long)cfg.B);
+            mpz_fdiv_r_2exp(expected, expected, (mp_bitcnt_t)cfg.L_c * 32u);
+            if (mpz_cmp(expected, got) != 0) {
+                fprintf(stderr, "Add-small mismatch in case %s at batch index %u\n", cfg.name, i);
+                mpz_clears(a, expected, got, NULL);
+                return false;
+            }
+            mpz_clears(a, expected, got, NULL);
+        }
+
+        const size_t workspace_after = batch_mp_workspace_size(ctx);
+        printf("  workspace: %zu -> %zu bytes\n", previous_workspace, workspace_after);
+        if (cfg.L_c <= 4096 && workspace_after != previous_workspace) {
+            fprintf(stderr, "Small add-small unexpectedly changed workspace size\n");
+            return false;
+        }
+        if (cfg.L_c > 4096 && workspace_after < previous_workspace) {
+            fprintf(stderr, "Workspace size shrank after large add-small\n");
+            return false;
+        }
+        previous_workspace = workspace_after;
+    }
+
+    ArrayOwner BadAddSmallA{make_array(2, 4)};
+    ArrayOwner BadAddSmallC{make_array(3, 5)};
+    if (batch_mp_add_small(ctx, BadAddSmallA.array, 7u, BadAddSmallC.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in add-small\n");
+        return false;
+    }
+
+    return true;
+}
+
 bool test_sub(BatchMPContext *ctx) {
     struct CaseConfig {
         const char *name;
@@ -288,6 +360,78 @@ bool test_sub(BatchMPContext *ctx) {
     ArrayOwner BadSubC{make_array(2, 5)};
     if (batch_mp_sub(ctx, BadSubA.array, BadSubB.array, BadSubC.array) != cudaErrorInvalidValue) {
         fprintf(stderr, "Expected batch mismatch to fail in subtraction\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool test_sub_small(BatchMPContext *ctx) {
+    struct CaseConfig {
+        const char *name;
+        uint32_t N;
+        uint32_t L_a;
+        uint32_t L_c;
+        uint32_t B;
+    };
+
+    const CaseConfig cases[] = {
+        {"small", 6, 12, 12, 0x02468ACEu},
+        {"workspace", 2, 5001, 5003, 0x89ABCDEFu},
+    };
+
+    size_t previous_workspace = batch_mp_workspace_size(ctx);
+
+    for (const CaseConfig &cfg : cases) {
+        ArrayOwner A{make_array(cfg.N, cfg.L_a)};
+        ArrayOwner C{make_array(cfg.N, cfg.L_c)};
+
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_C((size_t)cfg.N * C.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_a, A.array.stride, 0x27182818u);
+
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(C.array.data, 0, h_C.size() * sizeof(uint32_t)));
+
+        printf("Running sub_small %-12s N=%u L_a=%u L_c=%u B=%08x\n",
+               cfg.name, cfg.N, cfg.L_a, cfg.L_c, cfg.B);
+        CUDA_CHECK(batch_mp_sub_small(ctx, A.array, cfg.B, C.array));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(h_C.data(), C.array.data, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+        for (uint32_t i = 0; i < cfg.N; ++i) {
+            mpz_t a, expected, got;
+            mpz_inits(a, expected, got, NULL);
+            words_to_mpz(a, h_A.data() + (size_t)i * A.array.stride, cfg.L_a);
+            words_to_mpz(got, h_C.data() + (size_t)i * C.array.stride, cfg.L_c);
+            mpz_set(expected, a);
+            mpz_sub_ui(expected, expected, (unsigned long)cfg.B);
+            mpz_fdiv_r_2exp(expected, expected, (mp_bitcnt_t)cfg.L_c * 32u);
+            if (mpz_cmp(expected, got) != 0) {
+                fprintf(stderr, "Sub-small mismatch in case %s at batch index %u\n", cfg.name, i);
+                mpz_clears(a, expected, got, NULL);
+                return false;
+            }
+            mpz_clears(a, expected, got, NULL);
+        }
+
+        const size_t workspace_after = batch_mp_workspace_size(ctx);
+        printf("  workspace: %zu -> %zu bytes\n", previous_workspace, workspace_after);
+        if (cfg.L_c <= 4096 && workspace_after != previous_workspace) {
+            fprintf(stderr, "Small sub-small unexpectedly changed workspace size\n");
+            return false;
+        }
+        if (cfg.L_c > 4096 && workspace_after < previous_workspace) {
+            fprintf(stderr, "Workspace size shrank after large sub-small\n");
+            return false;
+        }
+        previous_workspace = workspace_after;
+    }
+
+    ArrayOwner BadSubSmallA{make_array(2, 4)};
+    ArrayOwner BadSubSmallC{make_array(3, 5)};
+    if (batch_mp_sub_small(ctx, BadSubSmallA.array, 7u, BadSubSmallC.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in sub-small\n");
         return false;
     }
 
@@ -435,7 +579,9 @@ int main() {
 
     run_with_context(test_mul);
     run_with_context(test_add);
+    run_with_context(test_add_small);
     run_with_context(test_sub);
+    run_with_context(test_sub_small);
     run_with_context(test_shift);
     run_with_context(test_bitlength_and_compact);
 
