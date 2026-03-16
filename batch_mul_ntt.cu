@@ -764,6 +764,51 @@ __global__ void fft_level_backward_radix32(
     }
 }
 
+__global__ void fft_level_backward_radix256(
+    uint3 *parts, int k, int i,
+    uint3 *roots_table_lv1, uint3 *roots_table_lv2,
+    size_t N
+){
+    __shared__ uint3 local_coefs[256][16];
+    i -= 7;
+    const uint32_t step = 1u << (k - 8 - i);
+    const uint32_t seq_len = 1u << i;
+    for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 8)); j += blockDim.x * gridDim.x){
+        size_t group = j >> (k - 8 - i);
+        size_t offset = group << (k - i);
+        uint32_t seq_id = (uint32_t)(group & (seq_len - 1));
+        uint32_t step_id = (uint32_t)(j & (step - 1));
+
+        for (int t = threadIdx.y; t < 256; t += blockDim.y){
+            local_coefs[t][threadIdx.x] = parts[offset + step_id + (size_t)step * t];
+        }
+        __syncthreads();
+
+        for (int lv = 0; lv <= 7; lv++){
+            uint32_t stride = 1u << lv;
+            for (int t = threadIdx.y; t < 128; t += blockDim.y){
+                int idx = ((t >> lv) << lv) + t;
+                uint32_t bitrev_seq_id = ((seq_id << (7 - lv)) | (idx >> (lv + 1))) * 2;
+                bitrev_seq_id = __brev(-__brev(bitrev_seq_id));
+                uint3 twiddle_factor = roots_table_lv2[bitrev_seq_id & 0xffff];
+                if (bitrev_seq_id >= 65536){
+                    twiddle_factor = mul_mod(twiddle_factor, roots_table_lv1[bitrev_seq_id >> 16]);
+                }
+                uint3 u = local_coefs[idx][threadIdx.x];
+                uint3 v = local_coefs[idx + stride][threadIdx.x];
+                local_coefs[idx][threadIdx.x] = add_mod(u, v);
+                local_coefs[idx + stride][threadIdx.x] = mul_mod(sub_mod(u, v), twiddle_factor);
+            }
+            __syncthreads();
+        }
+
+        for (int t = threadIdx.y; t < 256; t += blockDim.y){
+            parts[offset + step_id + (size_t)step * t] = local_coefs[t][threadIdx.x];
+        }
+        __syncthreads();
+    }
+}
+
 __device__ __forceinline__ ushort2 combine_carry(ushort2 a, ushort2 b){
     ushort compound = a.y + b.x;
     a.x += compound >> 2;
@@ -1738,6 +1783,122 @@ static uint32_t get_N_max(uint32_t N, uint32_t L_a, uint32_t L_b){
     return max(1, N);
 }
 
+enum FFTScheduleOp {
+    FFT_SCHEDULE_LOCAL = 0,
+    FFT_SCHEDULE_RADIX16 = 1,
+    FFT_SCHEDULE_RADIX32 = 2,
+    FFT_SCHEDULE_RADIX256 = 3,
+    FFT_SCHEDULE_RADIX16_INITIAL = 4,
+    FFT_SCHEDULE_RADIX32_INITIAL = 5,
+};
+
+static int forward_schedule_op(int k, int i){
+    if (k - i <= 12){
+        return FFT_SCHEDULE_LOCAL;
+    }
+    if (k < 14 || k > 28){
+        if (k >= 23){
+            return FFT_SCHEDULE_RADIX256;
+        }
+        if (k >= 22 || (i != 0 && k - i == 16)){
+            return FFT_SCHEDULE_RADIX32;
+        }
+        return FFT_SCHEDULE_RADIX16;
+    }
+    if (k == 14){
+        return (i == 0) ? FFT_SCHEDULE_RADIX16 : FFT_SCHEDULE_LOCAL;
+    }
+    if (k == 15){
+        return (i == 0) ? FFT_SCHEDULE_RADIX32 : FFT_SCHEDULE_LOCAL;
+    }
+    if (k <= 20){
+        return (i == 0) ? FFT_SCHEDULE_RADIX256 : FFT_SCHEDULE_LOCAL;
+    }
+    if (k <= 23){
+        if (i == 0){
+            return FFT_SCHEDULE_RADIX32;
+        }
+        if (i == 5){
+            return FFT_SCHEDULE_RADIX256;
+        }
+        return FFT_SCHEDULE_LOCAL;
+    }
+    if (i == 0 || i == 8){
+        return FFT_SCHEDULE_RADIX256;
+    }
+    return FFT_SCHEDULE_LOCAL;
+}
+
+static int backward_schedule_local_start(int k){
+    if (k < 14 || k > 28){
+        bool use_path_5 = k >= 24;
+        int i0 = max(0, k - 12);
+        if (use_path_5){
+            i0 += (100 - i0) % 5;
+        }else{
+            i0 += (4 - i0) & 3;
+        }
+        return i0;
+    }
+    if (k == 14){
+        return 4;
+    }
+    if (k <= 17){
+        return 5;
+    }
+    if (k == 18){
+        return 9;
+    }
+    if (k == 19){
+        return 10;
+    }
+    if (k == 20){
+        return 12;
+    }
+    if (k <= 25){
+        return 13;
+    }
+    return 18;
+}
+
+static int backward_schedule_op(int k, int i){
+    if (k < 14 || k > 28){
+        bool use_path_5 = k >= 24;
+        if (use_path_5){
+            return (i - 4 != 0) ? FFT_SCHEDULE_RADIX32 : FFT_SCHEDULE_RADIX32_INITIAL;
+        }
+        return (i - 3 != 0) ? FFT_SCHEDULE_RADIX16 : FFT_SCHEDULE_RADIX16_INITIAL;
+    }
+    switch (k){
+        case 14:
+            return FFT_SCHEDULE_RADIX16_INITIAL;
+        case 15:
+        case 16:
+        case 17:
+            return FFT_SCHEDULE_RADIX32_INITIAL;
+        case 18:
+            return (i == 8) ? FFT_SCHEDULE_RADIX16 : FFT_SCHEDULE_RADIX32_INITIAL;
+        case 19:
+            return (i == 9) ? FFT_SCHEDULE_RADIX32 : FFT_SCHEDULE_RADIX32_INITIAL;
+        case 20:
+            return (i == 11) ? FFT_SCHEDULE_RADIX256 : FFT_SCHEDULE_RADIX16_INITIAL;
+        case 21:
+        case 22:
+        case 23:
+        case 24:
+        case 25:
+            return (i == 12) ? FFT_SCHEDULE_RADIX256 : FFT_SCHEDULE_RADIX32_INITIAL;
+        default:
+            if (i == 17){
+                return FFT_SCHEDULE_RADIX32;
+            }
+            if (i == 12){
+                return FFT_SCHEDULE_RADIX256;
+            }
+            return FFT_SCHEDULE_RADIX32_INITIAL;
+    }
+}
+
 void batch_mul_ntt(
     uint32_t * A,
     uint32_t * B,
@@ -1792,8 +1953,9 @@ void batch_mul_ntt(
         uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
         uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
 
-        for (int i = 0; i < k; i ++){
-            if (k - i <= 12){
+        for (int i = 0; i < k; ){
+            int schedule_op = forward_schedule_op(k, i);
+            if (schedule_op == FFT_SCHEDULE_LOCAL){
                 int local_size = 1 << (k - i);
                 int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
                 if (k - i <= 10){
@@ -1815,9 +1977,9 @@ void batch_mul_ntt(
                         N * 2 // we use 2 * N to do parts_a and parts_b
                     );
                 }
-                i = k - 1;
+                break;
             }else{
-                if (k >= 23){
+                if (schedule_op == FFT_SCHEDULE_RADIX256){
                     int num_blocks = min(((size_t)N) << (k - 11), (size_t)65536);
                     if (i != 0){
                         fft_level_forward_radix256<<<num_blocks, dim3(16, 32, 1)>>>(
@@ -1833,8 +1995,8 @@ void batch_mul_ntt(
                             N * 2, L_a, L_b, stride_A, stride_B
                         );
                     }
-                    i += 7;
-                }else if (k >= 22 ||  (i != 0 && k - i == 16)){
+                    i += 8;
+                }else if (schedule_op == FFT_SCHEDULE_RADIX32){
                     int num_blocks = min(((size_t)N) << (k - 9), (size_t)65536);
                     if (i != 0){
                         fft_level_forward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
@@ -1851,7 +2013,7 @@ void batch_mul_ntt(
                             N * 2, L_a, L_b, stride_A, stride_B
                         );
                     }
-                    i += 4;
+                    i += 5;
                 }else{
                     int num_blocks = min(((size_t)N) << (k - 9), (size_t)65536);
                     if (i != 0){
@@ -1868,7 +2030,7 @@ void batch_mul_ntt(
                             N * 2, L_a, L_b, stride_A, stride_B
                         );
                     }
-                    i += 3;
+                    i += 4;
                 }
             }
         }
@@ -1880,73 +2042,78 @@ void batch_mul_ntt(
             pointwise_mul<<<num_blocks, threads_per_block>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
         }
         
-        bool use_path_5 = k >= 24;
-
-        for (int i = k - 1; i >= 0; i --){
-            if (i == k - 1){
-                int i0 = max(0, i - 11);
-                if (use_path_5){
-                     i0 += (100 - i0) % 5;
-                }else{
-                    i0 += (4 - i0) & 3;
-                }
-                int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
-                int local_size = 1 << (k - i0);
-                if (local_size <= 1024){
-                    fft_level_backward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
-                        parts_a,
-                        k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
-                        N
-                    );
-                }else if (local_size == 2048){
-                    fft_level_backward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
-                        parts_a,
-                        k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
-                        N
-                    );
-                }else{
-                    fft_level_backward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
-                        parts_a,
-                        k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
-                        N
-                    );
-                }
-                i = i0;
+        int i0 = backward_schedule_local_start(k);
+        {
+            int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
+            int local_size = 1 << (k - i0);
+            if (local_size <= 1024){
+                fft_level_backward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
+                    parts_a,
+                    k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
+                    N
+                );
+            }else if (local_size == 2048){
+                fft_level_backward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
+                    parts_a,
+                    k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
+                    N
+                );
             }else{
-                if (use_path_5){
-                    const int threads_per_block = 32;
-                    int num_blocks = min(((((size_t)N) << (k - 5)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                    if (i - 4 != 0){
-                        fft_level_backward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
-                            parts_a,
-                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N
-                        );
-                    }else{
-                        fft_level_backward_radix32_initial<<<num_blocks, dim3(32, 8, 1)>>>(
-                            parts_a, k, ret, reinterpret_cast<uint32_t*>(parts_b),
-                            tables.roots_table_lv2,
-                            N, L, stride_ret
-                        );
-                    }
+                fft_level_backward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
+                    parts_a,
+                    k, i0, tables.roots_table_lv1, tables.roots_table_lv2,
+                    N
+                );
+            }
+        }
+
+        for (int i = i0 - 1; i >= 0; ){
+            int schedule_op = backward_schedule_op(k, i);
+            if (schedule_op == FFT_SCHEDULE_RADIX256){
+                const int threads_per_block = 16;
+                int num_blocks = min(((((size_t)N) << (k - 8)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+                fft_level_backward_radix256<<<num_blocks, dim3(16, 32, 1)>>>(
+                    parts_a,
+                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                    N
+                );
+                i -= 8;
+            }else if (schedule_op == FFT_SCHEDULE_RADIX32){
+                const int threads_per_block = 32;
+                int num_blocks = min(((((size_t)N) << (k - 5)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+                fft_level_backward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
+                    parts_a,
+                    k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                    N
+                );
+                i -= 5;
+            }else if (schedule_op == FFT_SCHEDULE_RADIX32_INITIAL){
+                const int threads_per_block = 32;
+                int num_blocks = min(((((size_t)N) << (k - 5)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+                fft_level_backward_radix32_initial<<<num_blocks, dim3(32, 8, 1)>>>(
+                    parts_a, k, ret, reinterpret_cast<uint32_t*>(parts_b),
+                    tables.roots_table_lv2,
+                    N, L, stride_ret
+                );
+                break;
+            }else{
+                const int threads_per_block = 64;
+                int num_blocks = min(((((size_t)N) << (k - 4)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
+                if (schedule_op == FFT_SCHEDULE_RADIX16 ||
+                    (schedule_op == FFT_SCHEDULE_RADIX16_INITIAL && K == 8192)){
+                    fft_level_backward_radix16<<<num_blocks, threads_per_block>>>(
+                        parts_a,
+                        k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                        N
+                    );
                     i -= 4;
                 }else{
-                    const int threads_per_block = 64;
-                    int num_blocks = min(((((size_t)N) << (k - 4)) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-                    if (i - 3 != 0 || K == 8192){
-                        fft_level_backward_radix16<<<num_blocks, threads_per_block>>>(
-                            parts_a,
-                            k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N
-                        );
-                    }else{
-                        fft_level_backward_radix16_initial<<<num_blocks, threads_per_block>>>(
-                            parts_a, k, ret, reinterpret_cast<uint32_t*>(parts_b),
-                            tables.roots_table_lv2,
-                            N, L, stride_ret
-                        );
-                    }
-                    i -= 3;
+                    fft_level_backward_radix16_initial<<<num_blocks, threads_per_block>>>(
+                        parts_a, k, ret, reinterpret_cast<uint32_t*>(parts_b),
+                        tables.roots_table_lv2,
+                        N, L, stride_ret
+                    );
+                    break;
                 }
             }
         }
