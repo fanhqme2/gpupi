@@ -143,6 +143,9 @@ struct StageProfiler {
 
 namespace {
 
+constexpr uint32_t kBlockCommonDivisorLo = 830297u;
+constexpr uint32_t kBlockCommonDivisorHi = 156590819u;
+
 cudaError_t append_stage_profile(
     StageProfiler * profiler,
     const char * kind,
@@ -292,6 +295,27 @@ cudaError_t profile_compact(
         false,
         profiler,
         [&]() { return array.compact(context); }
+    );
+}
+
+cudaError_t profile_exactdiv(
+    BatchMPContext * context,
+    BatchMPArray array,
+    const char * label,
+    uint32_t divisor,
+    uint32_t n1,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "exactdiv",
+        label,
+        n1,
+        array.batch_size,
+        array.length,
+        0,
+        false,
+        profiler,
+        [&]() { return batch_mp_exactdiv_small(context, array, divisor); }
     );
 }
 
@@ -553,6 +577,28 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             CHECK_AND_RETURN(err, release_all());
             err = profile_compact(context, R_next, "R", n1, profiler);
             CHECK_AND_RETURN(err, release_all());
+
+            err = profile_exactdiv(context, P_next, "P", kBlockCommonDivisorLo, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_exactdiv(context, P_next, "P", kBlockCommonDivisorHi, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, P_next, "P", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+
+            err = profile_exactdiv(context, Q_next, "Q", kBlockCommonDivisorLo, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_exactdiv(context, Q_next, "Q", kBlockCommonDivisorHi, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, Q_next, "Q", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+
+            err = profile_exactdiv(context, R_next, "R", kBlockCommonDivisorLo, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_exactdiv(context, R_next, "R", kBlockCommonDivisorHi, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, R_next, "R", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+
             std::swap(P, P_next);
             std::swap(Q, Q_next);
             std::swap(R, R_next);
@@ -704,6 +750,7 @@ int main(int argc, char ** argv){
         float total_add_ms = 0.0f;
         float total_sub_ms = 0.0f;
         float total_compact_ms = 0.0f;
+        float total_exactdiv_ms = 0.0f;
         float total_ntt_ms = 0.0f;
         for (int idx = 0; idx < profiler.count; ++idx) {
             const StageProfileEntry & entry = profiler.entries[idx];
@@ -717,6 +764,8 @@ int main(int argc, char ** argv){
                 total_sub_ms += entry.elapsed_ms;
             } else if (strcmp(entry.kind, "compact") == 0) {
                 total_compact_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "exactdiv") == 0) {
+                total_exactdiv_ms += entry.elapsed_ms;
             }
             if (strcmp(entry.kind, "mul") == 0 && entry.uses_ntt) {
                 total_ntt_ms += entry.elapsed_ms;
@@ -735,15 +784,16 @@ int main(int argc, char ** argv){
             );
         }
         printf(
-            "leaf_total_ms=%.3f mul_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f ntt_total_ms=%.3f\n",
+            "leaf_total_ms=%.3f mul_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f exactdiv_total_ms=%.3f ntt_total_ms=%.3f\n",
             total_leaf_ms,
             total_mul_ms,
             total_add_ms,
             total_sub_ms,
             total_compact_ms,
+            total_exactdiv_ms,
             total_ntt_ms
         );
-        float accounted = total_leaf_ms + total_mul_ms + total_add_ms + total_sub_ms + total_compact_ms;
+        float accounted = total_leaf_ms + total_mul_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
         printf("N=%d elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n", N, elapsed_ms, accounted, (int)(batch_mp_workspace_size(context) / (1024 * 1024)));
         // release_array(&P);
         // release_array(&Q);

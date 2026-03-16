@@ -152,6 +152,32 @@ def compare_value(name, expected, actual):
     print_limb_mismatch(name, expected, actual)
     return False
 
+
+def compare_up_to_common_scale(expected, actual):
+    if actual["Q"] == 0:
+        print("Actual Q is zero")
+        return False
+    scale, rem = divmod(expected["Q"], actual["Q"])
+    if rem != 0:
+        print("Q does not divide expected Q exactly")
+        return False
+    ok = True
+    for name in ("P", "R"):
+        scaled = actual[name] * scale
+        if scaled == expected[name]:
+            print("%s matches after common scaling" % name)
+        else:
+            print("%s mismatch after common scaling" % name)
+            print_limb_mismatch(name, expected[name], scaled)
+            ok = False
+    if actual["Q"] * scale == expected["Q"]:
+        print("Q matches after common scaling")
+    else:
+        print("Q mismatch after common scaling")
+        ok = False
+    print("common_scale_bits=%d common_scale_limbs=%d" % (scale.bit_length(), limb_length(scale)))
+    return ok
+
 def main():
     N = int(sys.argv[1])
     binary = sys.argv[2] if len(sys.argv) >= 3 else "./pi_bs_gpu"
@@ -167,12 +193,10 @@ def main():
     )
     actual = parse_cuda_output(result.stdout)
 
-    ok = True
-    for name in ("P", "Q", "R"):
-        ok = compare_value(name, expected[name], actual[name]) and ok
+    ok = compare_up_to_common_scale(expected, actual)
 
     if ok:
-        print("All values match for N=%d" % N)
+        print("All values match up to a shared scale factor for N=%d" % N)
     else:
         sys.exit(1)
 
