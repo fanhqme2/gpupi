@@ -451,6 +451,96 @@ bool test_shift_add(BatchMPContext *ctx) {
     return true;
 }
 
+bool test_shift_sub(BatchMPContext *ctx) {
+    struct CaseConfig {
+        const char *name;
+        uint32_t N;
+        uint32_t L_a;
+        uint32_t L_b;
+        uint32_t L_c;
+        uint32_t shift;
+    };
+
+    const CaseConfig cases[] = {
+        {"small", 6, 11, 14, 15, 29},
+        {"workspace", 2, 5000, 4097, 5003, 63},
+    };
+
+    size_t previous_workspace = batch_mp_workspace_size(ctx);
+
+    for (const CaseConfig &cfg : cases) {
+        ArrayOwner A{make_array(cfg.N, cfg.L_a)};
+        ArrayOwner B{make_array(cfg.N, cfg.L_b)};
+        ArrayOwner C{make_array(cfg.N, cfg.L_c)};
+
+        std::vector<uint32_t> h_A((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_B((size_t)cfg.N * B.array.stride);
+        std::vector<uint32_t> h_C((size_t)cfg.N * C.array.stride, 0u);
+        fill_words(h_A, cfg.N, cfg.L_a, A.array.stride, 0xA1B2C3D4u);
+        fill_words(h_B, cfg.N, cfg.L_b, B.array.stride, 0x4D3C2B1Au);
+
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(B.array.data, h_B.data(), h_B.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(C.array.data, 0, h_C.size() * sizeof(uint32_t)));
+
+        printf("Running shift_sub %-12s N=%u L_a=%u L_b=%u L_c=%u shift=%u\n",
+               cfg.name, cfg.N, cfg.L_a, cfg.L_b, cfg.L_c, cfg.shift);
+        CUDA_CHECK(batch_mp_shift_sub(ctx, A.array, B.array, cfg.shift, C.array));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(h_C.data(), C.array.data, h_C.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+        for (uint32_t i = 0; i < cfg.N; ++i) {
+            mpz_t a, b, expected, got;
+            mpz_inits(a, b, expected, got, NULL);
+            words_to_mpz(a, h_A.data() + (size_t)i * A.array.stride, cfg.L_a);
+            words_to_mpz(b, h_B.data() + (size_t)i * B.array.stride, cfg.L_b);
+            words_to_mpz(got, h_C.data() + (size_t)i * C.array.stride, cfg.L_c);
+            mpz_mul_2exp(expected, a, (mp_bitcnt_t)cfg.shift);
+            mpz_sub(expected, expected, b);
+            mpz_fdiv_r_2exp(expected, expected, (mp_bitcnt_t)cfg.L_c * 32u);
+            if (mpz_cmp(expected, got) != 0) {
+                fprintf(stderr, "Shift-sub mismatch in case %s at batch index %u\n", cfg.name, i);
+                mpz_clears(a, b, expected, got, NULL);
+                return false;
+            }
+            mpz_clears(a, b, expected, got, NULL);
+        }
+
+        const size_t workspace_after = batch_mp_workspace_size(ctx);
+        printf("  workspace: %zu -> %zu bytes\n", previous_workspace, workspace_after);
+        if (cfg.L_c <= 4096 && workspace_after != previous_workspace) {
+            fprintf(stderr, "Small shift-sub unexpectedly changed workspace size\n");
+            return false;
+        }
+        if (cfg.L_c > 4096 && workspace_after < previous_workspace) {
+            fprintf(stderr, "Workspace size shrank after large shift-sub\n");
+            return false;
+        }
+        previous_workspace = workspace_after;
+    }
+
+    ArrayOwner BadShiftSubA{make_array(2, 4)};
+    ArrayOwner BadShiftSubB{make_array(3, 5)};
+    ArrayOwner BadShiftSubC{make_array(2, 6)};
+    if (batch_mp_shift_sub(ctx, BadShiftSubA.array, BadShiftSubB.array, 7u, BadShiftSubC.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected batch mismatch to fail in shift-sub\n");
+        return false;
+    }
+
+    ArrayOwner AliasA{make_array(2, 6)};
+    ArrayOwner AliasB{make_array(2, 6)};
+    if (batch_mp_shift_sub(ctx, AliasA.array, AliasB.array, 5u, AliasA.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected C == A alias to fail in shift-sub\n");
+        return false;
+    }
+    if (batch_mp_shift_sub(ctx, AliasA.array, AliasB.array, 5u, AliasB.array) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected C == B alias to fail in shift-sub\n");
+        return false;
+    }
+
+    return true;
+}
+
 bool test_sub(BatchMPContext *ctx) {
     struct CaseConfig {
         const char *name;
@@ -769,6 +859,7 @@ int main() {
     run_with_context(test_add);
     run_with_context(test_add_small);
     run_with_context(test_shift_add);
+    run_with_context(test_shift_sub);
     run_with_context(test_sub);
     run_with_context(test_sub_small);
     run_with_context(test_shift);

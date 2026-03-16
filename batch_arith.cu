@@ -10,6 +10,7 @@
 #include "batch_mul_small.h"
 #include "batch_shift.h"
 #include "batch_shift_add.h"
+#include "batch_shift_sub.h"
 #include "batch_sub.h"
 #include "batch_sub_small.h"
 
@@ -276,6 +277,32 @@ cudaError_t batch_mp_shift_add(BatchMPContext *ctx, BatchMPArray A, BatchMPArray
     }
 
     batch_shift_add_simple(
+        A.data, B.data, C.data, ctx->workspace, shift,
+        A.batch_size, A.length, B.length, C.length, A.stride, B.stride, C.stride
+    );
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_shift_sub(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, uint32_t shift, BatchMPArray C) {
+    if (ctx == nullptr || !valid_array(A) || !valid_array(B) || !valid_array(C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (!same_batch(A, B) || !same_batch(A, C)) {
+        return cudaErrorInvalidValue;
+    }
+    if (C.data == A.data || C.data == B.data) {
+        return cudaErrorInvalidValue;
+    }
+
+    const size_t workspace_size = batch_shift_sub_simple_workspace_size(
+        A.batch_size, A.length, B.length, C.length, shift
+    );
+    cudaError_t err = ensure_workspace(ctx, workspace_size);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    batch_shift_sub_simple(
         A.data, B.data, C.data, ctx->workspace, shift,
         A.batch_size, A.length, B.length, C.length, A.stride, B.stride, C.stride
     );

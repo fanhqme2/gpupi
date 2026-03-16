@@ -6,6 +6,7 @@ nvcc -O3 -std=c++17 -o batch_arith_test \
     batch_add.cu \
     batch_add_small.cu \
     batch_shift_add.cu \
+    batch_shift_sub.cu \
     batch_mul_small.cu \
     batch_sub.cu \
     batch_sub_small.cu \
