@@ -59,6 +59,15 @@ cudaError_t batch_mp_mul_small(
     BatchMPArray C
 );
 
+// Divide N large integers in place by one shared odd uint32_t divisor.
+// Exact division is required for every batch item.
+// Returns cudaErrorInvalidValue if A is invalid, B is even/zero, or A.length > 128.
+cudaError_t batch_mp_exactdiv_small(
+    BatchMPContext * ctx,
+    BatchMPArray A,
+    uint32_t B
+);
+
 // Add N pairs of large integers and write the truncated result into C.
 // Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_add(

@@ -5,6 +5,7 @@
 #include "batch_add.h"
 #include "batch_add_small.h"
 #include "batch_bitlength.h"
+#include "batch_exactdiv_small.h"
 #include "batch_mul_naive.h"
 #include "batch_mul_ntt.h"
 #include "batch_mul_small.h"
@@ -212,6 +213,18 @@ cudaError_t batch_mp_mul_small(BatchMPContext *ctx, BatchMPArray A, uint32_t B, 
         A.data, B, C.data, ctx->workspace,
         A.batch_size, A.length, C.length, A.stride, C.stride
     );
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_exactdiv_small(BatchMPContext *ctx, BatchMPArray A, uint32_t B) {
+    if (ctx == nullptr || !valid_array(A)) {
+        return cudaErrorInvalidValue;
+    }
+    if (B == 0u || (B & 1u) == 0u || A.length > 128u) {
+        return cudaErrorInvalidValue;
+    }
+
+    batch_exactdiv_small(A.data, B, A.batch_size, A.length, A.stride);
     return cudaGetLastError();
 }
 

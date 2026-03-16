@@ -43,6 +43,34 @@ void words_to_mpz(mpz_t out, const uint32_t *words, size_t count) {
     mpz_import(out, count, -1, sizeof(uint32_t), 0, 0, words);
 }
 
+void fill_exactdiv_input(
+    std::vector<uint32_t> &dividend,
+    std::vector<uint32_t> &quotient,
+    uint32_t N,
+    uint32_t L,
+    uint32_t stride,
+    uint32_t B,
+    uint32_t seed
+) {
+    std::fill(dividend.begin(), dividend.end(), 0u);
+    std::fill(quotient.begin(), quotient.end(), 0u);
+
+    for (uint32_t i = 0; i < N; ++i) {
+        uint32_t carry = 0u;
+        for (uint32_t j = 0; j < L; ++j) {
+            uint32_t q = make_word(seed, i, j);
+            if (j + 1u == L) {
+                const uint32_t max_q = (0xffffffffu - carry) / B;
+                q %= (max_q + 1u);
+            }
+            quotient[(size_t)i * stride + j] = q;
+            const uint64_t prod = (uint64_t)q * (uint64_t)B + (uint64_t)carry;
+            dividend[(size_t)i * stride + j] = (uint32_t)prod;
+            carry = (uint32_t)(prod >> 32);
+        }
+    }
+}
+
 struct ArrayOwner {
     BatchMPArray array{};
 
@@ -283,6 +311,89 @@ bool test_add(BatchMPContext *ctx) {
     ArrayOwner BadAddC{make_array(2, 5)};
     if (batch_mp_add(ctx, BadAddA.array, BadAddB.array, BadAddC.array) != cudaErrorInvalidValue) {
         fprintf(stderr, "Expected batch mismatch to fail in addition\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool test_exactdiv_small(BatchMPContext *ctx) {
+    struct CaseConfig {
+        const char *name;
+        uint32_t N;
+        uint32_t L;
+        uint32_t stride;
+        uint32_t B;
+    };
+
+    const CaseConfig cases[] = {
+        {"direct", 17, 7, 9, 0x13579BDFu},
+        {"tiled", 65, 96, 101, 0xFFFF'FFFDu},
+        {"max_len", 11, 128, 128, 3u},
+    };
+
+    const size_t previous_workspace = batch_mp_workspace_size(ctx);
+
+    for (const CaseConfig &cfg : cases) {
+        ArrayOwner A{make_array(cfg.N, cfg.L, cfg.stride)};
+
+        std::vector<uint32_t> h_dividend((size_t)cfg.N * A.array.stride);
+        std::vector<uint32_t> h_dividend_before;
+        std::vector<uint32_t> h_quotient((size_t)cfg.N * A.array.stride);
+        fill_exactdiv_input(h_dividend, h_quotient, cfg.N, cfg.L, A.array.stride, cfg.B, 0x5A17C3E2u);
+        h_dividend_before = h_dividend;
+
+        CUDA_CHECK(cudaMemcpy(A.array.data, h_dividend.data(), h_dividend.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+
+        printf("Running exactdiv_small %-8s N=%u L=%u stride=%u B=%08x\n",
+               cfg.name, cfg.N, cfg.L, cfg.stride, cfg.B);
+        CUDA_CHECK(batch_mp_exactdiv_small(ctx, A.array, cfg.B));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(h_dividend.data(), A.array.data, h_dividend.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+        for (uint32_t i = 0; i < cfg.N; ++i) {
+            mpz_t dividend_mpz, expected, got;
+            mpz_inits(dividend_mpz, expected, got, NULL);
+            words_to_mpz(dividend_mpz, h_dividend_before.data() + (size_t)i * A.array.stride, cfg.L);
+            words_to_mpz(expected, h_quotient.data() + (size_t)i * A.array.stride, cfg.L);
+            words_to_mpz(got, h_dividend.data() + (size_t)i * A.array.stride, cfg.L);
+            if (mpz_cmp(expected, got) != 0) {
+                fprintf(stderr, "Exactdiv-small reference mismatch in case %s at batch index %u\n", cfg.name, i);
+                mpz_clears(dividend_mpz, expected, got, NULL);
+                return false;
+            }
+            mpz_divexact_ui(dividend_mpz, dividend_mpz, (unsigned long)cfg.B);
+            if (mpz_cmp(dividend_mpz, got) != 0) {
+                fprintf(stderr, "Exactdiv-small GMP mismatch in case %s at batch index %u\n", cfg.name, i);
+                mpz_clears(dividend_mpz, expected, got, NULL);
+                return false;
+            }
+            mpz_clears(dividend_mpz, expected, got, NULL);
+        }
+
+        const size_t workspace_after = batch_mp_workspace_size(ctx);
+        printf("  workspace: %zu -> %zu bytes\n", previous_workspace, workspace_after);
+        if (workspace_after != previous_workspace) {
+            fprintf(stderr, "Exactdiv-small unexpectedly changed workspace size\n");
+            return false;
+        }
+    }
+
+    ArrayOwner BadEven{make_array(2, 8)};
+    if (batch_mp_exactdiv_small(ctx, BadEven.array, 6u) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected even divisor to fail in exactdiv-small\n");
+        return false;
+    }
+
+    ArrayOwner BadZero{make_array(2, 8)};
+    if (batch_mp_exactdiv_small(ctx, BadZero.array, 0u) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected zero divisor to fail in exactdiv-small\n");
+        return false;
+    }
+
+    ArrayOwner TooLong{make_array(2, 129)};
+    if (batch_mp_exactdiv_small(ctx, TooLong.array, 3u) != cudaErrorInvalidValue) {
+        fprintf(stderr, "Expected length > 128 to fail in exactdiv-small\n");
         return false;
     }
 
@@ -856,6 +967,7 @@ int main() {
 
     run_with_context(test_mul);
     run_with_context(test_mul_small);
+    run_with_context(test_exactdiv_small);
     run_with_context(test_add);
     run_with_context(test_add_small);
     run_with_context(test_shift_add);
