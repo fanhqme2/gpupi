@@ -77,6 +77,17 @@ cudaError_t batch_mp_add_small(
     BatchMPArray C
 );
 
+// Compute C = (A << shift) + B and write the truncated result into C.
+// C must not alias A or B.
+// Returns cudaErrorInvalidValue if the batch dimensions mismatch or if C aliases A or B.
+cudaError_t batch_mp_shift_add(
+    BatchMPContext * ctx,
+    BatchMPArray A,
+    BatchMPArray B,
+    uint32_t shift,
+    BatchMPArray C
+);
+
 // Subtract N pairs of large integers modulo 2^(32 * C.length).
 // Returns cudaErrorInvalidValue if the batch dimensions mismatch.
 cudaError_t batch_mp_sub(
