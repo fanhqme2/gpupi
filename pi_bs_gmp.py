@@ -72,9 +72,10 @@ def binary_split(i, j, is_initial = False):
         q1 = i + 1
         q2 = i + 1
         q3 = i + 1
-        q4 = 640320
-        q5 = 40020
-        q6 = 426880
+        q4 = 640320 >> 6
+        q5 = 40020 >> 2
+        q6 = 426880 >> 7
+
         r1 = 545140134 * i + 13591409
 
         if p1 % 5 == 0 and q1 % 5 == 0:
@@ -106,14 +107,19 @@ def binary_split(i, j, is_initial = False):
     p1, q1, r1 = binary_split(i, k)
     if is_initial:
         q2, r2 = binary_split(k, j, True)
-        if i == 0:
-            q2, r2 = trim_prec_quotient(q2, r2, prec_bits = (prec_bits - (15 * (j - k))))
+        #if i == 0:
+            #q2, r2 = trim_prec_quotient(q2, r2, prec_bits = (prec_bits - (15 * (j - k))))
+            #q2, r2 = trim_prec_quotient(q2, r2, prec_bits = prec_bits)
+        q2, r2 = trim_prec_quotient(q2, r2, prec_bits = int((j - k) * 14 * 3.322 + 34))
     else:
         p2, q2, r2 = binary_split(k, j)
     
     q = q1 * q2
     r1 = r1 * q2
     r2 = p1 * r2
+
+    r1 = r1 << (15 * (j - k))
+
     if (k - i) & 1:
         r = r1 - r2
     else:
@@ -122,7 +128,7 @@ def binary_split(i, j, is_initial = False):
         return q, r
     p = p1 * p2
 
-    # if j - i >= 64 and j - i < 128:
+    # if j - i >= 128 and j - i < 256:
     #     g = gmpy2.gcd(p, q)
     #     g = gmpy2.gcd(g, r)
     #     p //= g
@@ -137,8 +143,10 @@ t0 = time.time()
 q, r = binary_split(0, n_terms, is_initial = True)
 
 print('binary splitting time %.3fs' % (time.time() - t0))
-print('len(hex(q))', q.num_digits(16) + 2)
-print('len(hex(r))', r.num_digits(16) + 2)
+print('len(hex(q))', q.num_digits(16) + 2)# hex(q)[:10] + '...' + hex(q)[-10:])
+print('len(hex(r))', r.num_digits(16) + 2)# hex(r)[:10] + '...' + hex(r)[-10:])
+
+r = r >> (15 * n_terms - 8)
 
 q, r = trim_prec_quotient(q, r, prec_bits = prec_bits)
 
@@ -252,5 +260,5 @@ print('decimal time %.3fs' % (time.time() - t0))
 #fout = open('./%d.txt'%target_digits, 'w')
 #fout.write(ret)
 #fout.close()
-assert ret == ret_gt
 print(ret[:20] + '...' + ret[-20:])
+assert ret == ret_gt

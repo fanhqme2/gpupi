@@ -28,19 +28,25 @@ __device__ __forceinline__ void reduce_gcd_quotient(uint32_t &a, uint32_t &b){
     }
 }
 
-// leaf case of binary splitting
-// 0 <= begin < end <= 71428572
-__global__ void construct_leaf(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * arr_R, int begin, int end){
-    for (int i = begin + blockIdx.x * blockDim.x + threadIdx.x; i < end; i += blockDim.x * gridDim.x){
+// leaf case of binary splitting.
+template<bool is_head>
+__global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * arr_R, int N){
+    for (int i2 = blockIdx.x * blockDim.x + threadIdx.x; i2 < N; i2 += blockDim.x * gridDim.x){
+        int i;
+        if (is_head){
+            i = i2 * 17 + 16;
+        }else{
+            i = i2 + (i2 >> 4);
+        }
         uint32_t p1 = 6 * i + 1;
         uint32_t p2 = 2 * i + 1;
         uint32_t p3 = 6 * i + 5;
         uint32_t q1 = i + 1;
         uint32_t q2 = i + 1;
         uint32_t q3 = i + 1;
-        uint32_t q4 = 640320;
-        uint32_t q5 = 40020;
-        uint32_t q6 = 426880;
+        uint32_t q4 = 640320 >> 6;
+        uint32_t q5 = 40020 >> 2;
+        uint32_t q6 = 426880 >> 7;
         uint64_t r1 = (int64_t)545140134 * i + 13591409;
         if (p1 % 5 == 0 && q1 % 5 == 0) {
             p1 /= 5;
@@ -77,12 +83,12 @@ __global__ void construct_leaf(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * ar
             }
         }
 
-        uint32_t Q[5] = {q1, 0, 0, 0, 0};
+        uint32_t Q[4] = {q1, 0, 0, 0};
         uint32_t q_components[5] = {q2, q3, q4, q5, q6};
 
         for (int k = 0; k < 5; k ++){
             uint32_t carry = 0;
-            for (int j = 0; j < 5; j++){
+            for (int j = 0; j < 4; j++){
                 uint64_t mul = (uint64_t)Q[j] * q_components[k] + carry;
                 Q[j] = mul & 0xffffffff;
                 carry = mul >> 32;
@@ -101,22 +107,21 @@ __global__ void construct_leaf(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * ar
             }
         }
 
-        arr_P[(i - begin) * 3 + 0] = P[0];
-        arr_P[(i - begin) * 3 + 1] = P[1];
-        arr_P[(i - begin) * 3 + 2] = P[2];
+        arr_P[i2 * 3 + 0] = P[0];
+        arr_P[i2 * 3 + 1] = P[1];
+        arr_P[i2 * 3 + 2] = P[2];
 
-        arr_Q[(i - begin) * 5 + 0] = Q[0];
-        arr_Q[(i - begin) * 5 + 1] = Q[1];
-        arr_Q[(i - begin) * 5 + 2] = Q[2];
-        arr_Q[(i - begin) * 5 + 3] = Q[3];
-        arr_Q[(i - begin) * 5 + 4] = Q[4];
+        arr_Q[i2 * 4 + 0] = Q[0];
+        arr_Q[i2 * 4 + 1] = Q[1];
+        arr_Q[i2 * 4 + 2] = Q[2];
+        arr_Q[i2 * 4 + 3] = Q[3];
 
-        arr_R[(i - begin) * 6 + 0] = R[0];
-        arr_R[(i - begin) * 6 + 1] = R[1];
-        arr_R[(i - begin) * 6 + 2] = R[2];
-        arr_R[(i - begin) * 6 + 3] = R[3];
-        arr_R[(i - begin) * 6 + 4] = R[4];
-        arr_R[(i - begin) * 6 + 5] = R[5];
+        arr_R[i2 * 6 + 0] = R[0];
+        arr_R[i2 * 6 + 1] = R[1];
+        arr_R[i2 * 6 + 2] = R[2];
+        arr_R[i2 * 6 + 3] = R[3];
+        arr_R[i2 * 6 + 4] = R[4];
+        arr_R[i2 * 6 + 5] = R[5];
     }
 }
 
@@ -132,7 +137,7 @@ struct StageProfileEntry {
 };
 
 struct StageProfiler {
-    StageProfileEntry entries[256];
+    StageProfileEntry entries[512];
     int count;
 };
 
@@ -289,13 +294,48 @@ cudaError_t profile_compact(
     );
 }
 
+cudaError_t profile_shift(
+    BatchMPContext * context,
+    BatchMPArray & array,
+    BatchMPArray & result,
+    int shift_amount,
+    const char * label,
+    uint32_t n1,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "shift",
+        label,
+        n1,
+        array.batch_size,
+        array.length,
+        0,
+        false,
+        profiler,
+        [&]() { return batch_mp_shift_bits(context, array, result, shift_amount); }
+    );
+}
+
 }  // namespace
 
-// the batched level. We must have j-i is a power of 2.
-cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMPArray &P, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr){
+#define CHECK_AND_RETURN(err, cleanup) \
+    do { \
+        cudaError_t _err = (err); \
+        if (_err != cudaSuccess) { \
+            fprintf(stderr, "Error at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(_err)); \
+            cleanup; \
+            return _err; \
+        } \
+    } while (0)
 
+// do binary splitting for N * 17 elements, where N is a power of 2
+cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &P, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr){
+    // pre-allocate workspace for the 2^28 case
     batch_mp_ensure_workspace(context, 6442450944ull);
 
+    BatchMPArray P0 = {};
+    BatchMPArray Q0 = {};
+    BatchMPArray R0 = {};
     P = {};
     Q = {};
     R = {};
@@ -303,9 +343,10 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
     BatchMPArray Q_next{};
     BatchMPArray R_next{};
     BatchMPArray R_prod_1{};
+    BatchMPArray R_prod_1_shifted{};
     BatchMPArray R_prod_2{};
-    const int n = j - i;
-    if (context == nullptr || i < 0 || j <= i || (n & (n - 1)) != 0) {
+    
+    if (context == nullptr || (N & (N - 1)) != 0) {
         return cudaErrorInvalidValue;
     }
 
@@ -319,37 +360,43 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
         release_array(P);
         release_array(Q);
         release_array(R);
+        release_array(P0);
+        release_array(Q0);
+        release_array(R0);
         release_array(P_next);
         release_array(Q_next);
         release_array(R_next);
         release_array(R_prod_1);
+        release_array(R_prod_1_shifted);
         release_array(R_prod_2);
     };
 
-    P = batch_mp_array_create(n, 3);
-    Q = batch_mp_array_create(n, 5);
-    R = batch_mp_array_create(n, 6);
-    if (P.data == nullptr || Q.data == nullptr || R.data == nullptr) {
+    P0 = batch_mp_array_create(N, 3);
+    Q0 = batch_mp_array_create(N, 4);
+    R0 = batch_mp_array_create(N, 6);
+    P = batch_mp_array_create(N * 16, 3);
+    Q = batch_mp_array_create(N * 16, 5); // we ask for 5 size, but will only use 4, for safety
+    R = batch_mp_array_create(N * 16, 6);
+    if (P0.data == nullptr || Q0.data == nullptr || R0.data == nullptr || P.data == nullptr || Q.data == nullptr || R.data == nullptr) {
         release_all();
         return cudaErrorMemoryAllocation;
     }
+    Q.length = 4;
+    Q.stride = 4;
 
     const int threads_per_block = 128;
-    int num_blocks = (n + threads_per_block - 1) / threads_per_block;
-    if (num_blocks > 65535) {
-        num_blocks = 65535;
-    }
+    int num_blocks = min((N + threads_per_block - 1) / threads_per_block, 65535);
     cudaError_t err = profile_stage(
         "leaf",
         "construct_leaf",
-        (uint32_t)n,
-        (uint32_t)n,
-        P.length,
+        (uint32_t)N * 17,
+        (uint32_t)N,
+        P0.length,
         0,
         false,
         profiler,
         [&]() {
-            construct_leaf<<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, i, j);
+            construct_leaf_17<true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N);
             cudaError_t kernel_err = cudaGetLastError();
             if (kernel_err != cudaSuccess) {
                 return kernel_err;
@@ -357,33 +404,37 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
             return cudaDeviceSynchronize();
         }
     );
-    if (err != cudaSuccess) {
-        release_all();
-        return err;
-    }
-    if (n == 1) {
-        err = profile_compact(context, P, "P", (uint32_t)n, profiler);
-        if (err == cudaSuccess) {
-            err = profile_compact(context, Q, "Q", (uint32_t)n, profiler);
+    CHECK_AND_RETURN(err, release_all());
+    
+    err = profile_stage(
+        "leaf",
+        "construct_leaf",
+        (uint32_t)N * 17,
+        (uint32_t)N * 16,
+        P.length,
+        0,
+        false,
+        profiler,
+        [&]() {
+            construct_leaf_17<false><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16);
+            cudaError_t kernel_err = cudaGetLastError();
+            if (kernel_err != cudaSuccess) {
+                return kernel_err;
+            }
+            return cudaDeviceSynchronize();
         }
-        if (err == cudaSuccess) {
-            err = profile_compact(context, R, "R", (uint32_t)n, profiler);
-        }
-        if (err != cudaSuccess) {
-            release_all();
-        }
-        return err;
-    }
-
-    P_next = batch_mp_array_create(n / 2, P.length * 2);
-    Q_next = batch_mp_array_create(n / 2, Q.length * 2);
-    R_next = batch_mp_array_create(n / 2, R.length * 2);
-    R_prod_1 = batch_mp_array_create(n / 2, R.length + Q.length);
-    R_prod_2 = batch_mp_array_create(n / 2, R.length + P.length);
+    );
+    CHECK_AND_RETURN(err, release_all());
+    int n = N * 16;
+    P_next = batch_mp_array_create(n / 2, 6);
+    Q_next = batch_mp_array_create(n / 2, 10);
+    R_next = batch_mp_array_create(n / 2, 12);
+    R_prod_1 = batch_mp_array_create(n / 2, 11);
+    R_prod_1_shifted = batch_mp_array_create(n / 2, 12);
+    R_prod_2 = batch_mp_array_create(n / 2, 9);
     if (P_next.data == nullptr || Q_next.data == nullptr || R_next.data == nullptr ||
-        R_prod_1.data == nullptr || R_prod_2.data == nullptr) {
-        release_all();
-        return cudaErrorMemoryAllocation;
+        R_prod_1.data == nullptr || R_prod_1_shifted.data == nullptr || R_prod_2.data == nullptr) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
 
     for (uint32_t n1 = (uint32_t)n; n1 > 1; n1 >>= 1){
@@ -396,7 +447,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
             r = r1 - r2
         else:
             r = r1 + r2*/
-        const bool subtract = (n1 == (uint32_t)n);
+        const bool subtract = (n1 == (uint32_t)n) || (n1 == (n >> 4));
         //BatchMPArray P_next = batch_mp_array_create(n1 / 2, P.length * 2);
         P_next.batch_size = n1 / 2;
         P_next.length = P.length * 2;
@@ -415,15 +466,9 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
             .stride = P.stride * 2
         };
         err = profile_mul(context, P_even, P_odd, P_next, "P", n1, profiler);
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
-        err = profile_compact(context, P_next, "P", n1 / 2, profiler);
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
+        CHECK_AND_RETURN(err, release_all());
+        err = profile_compact(context, P_next, "P", n1, profiler);
+        CHECK_AND_RETURN(err, release_all());
         // BatchMPArray Q_next = batch_mp_array_create(n1 / 2, Q.length * 2);
         Q_next.batch_size = n1 / 2;
         Q_next.length = Q.length * 2;
@@ -442,15 +487,9 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
             .stride = Q.stride * 2
         };
         err = profile_mul(context, Q_even, Q_odd, Q_next, "Q", n1, profiler);
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
-        err = profile_compact(context, Q_next, "Q", n1 / 2, profiler);
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
+        CHECK_AND_RETURN(err, release_all());
+        err = profile_compact(context, Q_next, "Q", n1, profiler);
+        CHECK_AND_RETURN(err, release_all());
         BatchMPArray R_even = {
             .data = R.data,
             .length = R.length,
@@ -469,50 +508,86 @@ cudaError_t binary_split_batched(BatchMPContext * context, int i, int j, BatchMP
         R_prod_1.stride = R.length + Q.length;
 
         err = profile_mul(context, R_even, Q_odd, R_prod_1, "R*Q", n1, profiler);
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
+        CHECK_AND_RETURN(err, release_all());
+
+        int shift_amount = 15 * ((n / n1) + ((n / n1) >> 4));
+        R_prod_1_shifted.batch_size = n1 / 2;
+        R_prod_1_shifted.length = R_prod_1.length + (((shift_amount) + 31) >> 5);
+        R_prod_1_shifted.stride = R_prod_1.length + (((shift_amount) + 31) >> 5);
+        err = profile_shift(context, R_prod_1, R_prod_1_shifted, shift_amount, "R*Q<<15*(j-k)", n1, profiler);
+        CHECK_AND_RETURN(err, release_all());
+
         // BatchMPArray R_prod_2 = batch_mp_array_create(n1 / 2, R.length + P.length);
         R_prod_2.batch_size = n1 / 2;
         R_prod_2.length = R.length + P.length;
         R_prod_2.stride = R.length + P.length;
 
         err = profile_mul(context, P_even, R_odd, R_prod_2, "P*R", n1, profiler);
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
-        /*BatchMPArray R_next = batch_mp_array_create(
-            n1 / 2,
-            std::max(R_prod_1.length, R_prod_2.length) + 1
-        );*/
+        CHECK_AND_RETURN(err, release_all());
         R_next.batch_size = n1 / 2;
-        R_next.length = std::max(R_prod_1.length, R_prod_2.length) + 1;
-        R_next.stride = std::max(R_prod_1.length, R_prod_2.length) + 1;
+        R_next.length = std::max(R_prod_1_shifted.length, R_prod_2.length) + (subtract?0:1);
+        R_next.stride = std::max(R_prod_1_shifted.length, R_prod_2.length) + (subtract?0:1);
 
-        err = profile_addsub(context, R_prod_1, R_prod_2, R_next, subtract, n1, profiler);
-        if (err == cudaSuccess) {
-            err = profile_compact(context, R_next, "R", n1 / 2, profiler);
-        }
-        if (err != cudaSuccess) {
-            release_all();
-            return err;
-        }
-        // batch_mp_array_release(P);
-        // batch_mp_array_release(Q);
-        // batch_mp_array_release(R);
-        // P = P_next;
-        // Q = Q_next;
-        // R = R_next;
+        err = profile_addsub(context, R_prod_1_shifted, R_prod_2, R_next, subtract, n1, profiler);
+        CHECK_AND_RETURN(err, release_all());
+        err = profile_compact(context, R_next, "R", n1, profiler);
+        CHECK_AND_RETURN(err, release_all());
         std::swap(P, P_next);
         std::swap(Q, Q_next);
         std::swap(R, R_next);
+
+        if (n1 == (n >> 3)){
+            // we will add P0 here
+            P_next.batch_size = n1 / 2;
+            P_next.length = P.length + P0.length;
+            P_next.stride = P.length + P0.length;
+            err = profile_mul(context, P, P0, P_next, "P", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, P_next, "P", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            
+            Q_next.batch_size = n1 / 2;
+            Q_next.length = Q.length + Q0.length;
+            Q_next.stride = Q.length + Q0.length;
+            err = profile_mul(context, Q, Q0, Q_next, "Q", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, Q_next, "Q", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            R_prod_1.batch_size = n1 / 2;
+            R_prod_1.length = R.length + Q0.length;
+            R_prod_1.stride = R.length + Q0.length;
+            err = profile_mul(context, R, Q0, R_prod_1, "R*Q", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            R_prod_1_shifted.batch_size = n1 / 2;
+            R_prod_1_shifted.length = R_prod_1.length + 1;
+            R_prod_1_shifted.stride = R_prod_1.length + 1;
+            err = profile_shift(context, R_prod_1, R_prod_1_shifted, 15, "R*Q<<15", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            R_prod_2.batch_size = n1 / 2;
+            R_prod_2.length = P.length + R0.length;
+            R_prod_2.stride = P.length + R0.length;
+            err = profile_mul(context, P, R0, R_prod_2, "P*R", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            R_next.batch_size = n1 / 2;
+            R_next.length = std::max(R_prod_1_shifted.length, R_prod_2.length) + 1;
+            R_next.stride = std::max(R_prod_1_shifted.length, R_prod_2.length) + 1;
+            err = profile_addsub(context, R_prod_1_shifted, R_prod_2, R_next, false, n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, R_next, "R", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            std::swap(P, P_next);
+            std::swap(Q, Q_next);
+            std::swap(R, R_next);
+        }
     }
+    release_array(P0);
+    release_array(Q0);
+    release_array(R0);
     release_array(P_next);
     release_array(Q_next);
     release_array(R_next);
     release_array(R_prod_1);
+    release_array(R_prod_1_shifted);
     release_array(R_prod_2);
     return cudaSuccess;
 }
@@ -544,11 +619,10 @@ bool parse_int_arg(const char * text, int * value) {
 }
 
 void print_usage(const char * program) {
-    fprintf(stderr, "Usage: %s <begin> <end> [--benchmark|--profile-stages|--profile-mul]\n", program);
+    fprintf(stderr, "Usage: %s <N> [--benchmark|--profile-stages]\n", program);
     fprintf(stderr, "Dumps chunk P/Q/R for indices in [begin, end); end-begin must be a power of 2.\n");
     fprintf(stderr, "Use --benchmark to print only the binary-splitting GPU time in milliseconds.\n");
     fprintf(stderr, "Use --profile-stages to print timed leaf/add/sub/multiply stages within binary splitting.\n");
-    fprintf(stderr, "Use --profile-mul as a backward-compatible alias for --profile-stages.\n");
 }
 
 bool check_cuda(cudaError_t err, const char * what) {
@@ -562,39 +636,33 @@ bool check_cuda(cudaError_t err, const char * what) {
 }  // namespace
 
 int main(int argc, char ** argv){
-    int begin = 0;
-    int end = 0;
-    if (argc < 3) {
+    int N = 0;
+    if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
-    if (!parse_int_arg(argv[1], &begin) || !parse_int_arg(argv[2], &end)) {
+    if (!parse_int_arg(argv[1], &N)) {
         print_usage(argv[0]);
         return 1;
     }
-    if (begin < 0 || end <= begin) {
-        fprintf(stderr, "Invalid range: begin=%d end=%d\n", begin, end);
+    if (N < 0 || !is_power_of_two_int(N)) {
+        fprintf(stderr, "Invalid range: N=%d\n", N);
         return 1;
     }
     bool benchmark_only = false;
     bool profile_stages = false;
-    if (argc >= 4) {
-        if (strcmp(argv[3], "--benchmark") == 0) {
+    bool print_result = true;
+    if (argc >= 3) {
+        if (strcmp(argv[2], "--benchmark") == 0) {
             benchmark_only = true;
-        } else if (strcmp(argv[3], "--profile-stages") == 0) {
+            print_result = false;
+        }else if (strcmp(argv[2], "--profile-stages") == 0) {
             profile_stages = true;
-        } else if (strcmp(argv[3], "--profile-mul") == 0) {
-            profile_stages = true;
-        } else {
+            print_result = false;
+        }else {
             print_usage(argv[0]);
             return 1;
         }
-    }
-
-    const int count = end - begin;
-    if (!is_power_of_two_int(count)) {
-        fprintf(stderr, "Range length must be a power of 2: begin=%d end=%d\n", begin, end);
-        return 1;
     }
 
     BatchMPContext * context = batch_mp_init();
@@ -617,7 +685,7 @@ int main(int argc, char ** argv){
         return 1;
     }
     if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
-        !check_cuda(binary_split_batched(context, begin, end, P, Q, R, profile_stages ? &profiler : nullptr), "binary_split_batched") ||
+        !check_cuda(binary_split_batched(context, N, P, Q, R, profile_stages ? &profiler : nullptr), "binary_split_batched") ||
         !check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)") ||
         !check_cuda(cudaEventSynchronize(stop_event), "cudaEventSynchronize(stop)")) {
         cudaEventDestroy(start_event);
@@ -650,7 +718,7 @@ int main(int argc, char ** argv){
         return 1;
     }
     if (benchmark_only) {
-        printf("begin=%d end=%d elapsed_ms=%.3f\n", begin, end, elapsed_ms);
+        printf("N=%d elapsed_ms=%.3f\n", N, elapsed_ms);
         release_array(&P);
         release_array(&Q);
         release_array(&R);
@@ -663,8 +731,8 @@ int main(int argc, char ** argv){
         float total_add_ms = 0.0f;
         float total_sub_ms = 0.0f;
         float total_compact_ms = 0.0f;
+        float total_shift_ms = 0.0f;
         float total_ntt_ms = 0.0f;
-        printf("begin=%d end=%d elapsed_ms=%.3f\n", begin, end, elapsed_ms);
         for (int idx = 0; idx < profiler.count; ++idx) {
             const StageProfileEntry & entry = profiler.entries[idx];
             if (strcmp(entry.kind, "leaf") == 0) {
@@ -677,12 +745,14 @@ int main(int argc, char ** argv){
                 total_sub_ms += entry.elapsed_ms;
             } else if (strcmp(entry.kind, "compact") == 0) {
                 total_compact_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "shift") == 0) {
+                total_shift_ms += entry.elapsed_ms;
             }
             if (strcmp(entry.kind, "mul") == 0 && entry.uses_ntt) {
                 total_ntt_ms += entry.elapsed_ms;
             }
             printf(
-                "stage[%02d] kind=%s label=%s n1=%u batch=%u lhs_len=%u rhs_len=%u kernel_ms=%.3f uses_ntt=%d\n",
+                "stage[%03d] kind=%8s label=%14s n1=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
                 idx,
                 entry.kind,
                 entry.label,
@@ -695,41 +765,69 @@ int main(int argc, char ** argv){
             );
         }
         printf(
-            "leaf_total_ms=%.3f mul_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f ntt_total_ms=%.3f\n",
+            "leaf_total_ms=%.3f mul_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f shift_total_ms=%.3f ntt_total_ms=%.3f\n",
             total_leaf_ms,
             total_mul_ms,
             total_add_ms,
             total_sub_ms,
             total_compact_ms,
+            total_shift_ms,
             total_ntt_ms
         );
-        release_array(&P);
-        release_array(&Q);
-        release_array(&R);
-        batch_mp_destroy(context);
-        return 0;
-    }
-
-    uint32_t p_bits = 0;
-    uint32_t q_bits = 0;
-    uint32_t r_bits = 0;
-    if (!check_cuda(batch_mp_bitlength_max(context, P, &p_bits), "batch_mp_bitlength_max(P)") ||
-        !check_cuda(batch_mp_bitlength_max(context, Q, &q_bits), "batch_mp_bitlength_max(Q)") ||
-        !check_cuda(batch_mp_bitlength_max(context, R, &r_bits), "batch_mp_bitlength_max(R)")) {
-        release_array(&P);
-        release_array(&Q);
-        release_array(&R);
-        batch_mp_destroy(context);
-        return 1;
+        float accounted = total_leaf_ms + total_mul_ms + total_add_ms + total_sub_ms + total_compact_ms + total_shift_ms;
+        printf("N=%d elapsed_ms=%.3f accounted_ms=%.3f\n", N, elapsed_ms, accounted);
+        // release_array(&P);
+        // release_array(&Q);
+        // release_array(&R);
+        // batch_mp_destroy(context);
+        // return 0;
     }
 
     printf(
-        "begin=%d end=%d P_len=%u P_bits=%u Q_len=%u Q_bits=%u R_len=%u R_bits=%u\n",
-        begin, end,
-        P.length, p_bits,
-        Q.length, q_bits,
-        R.length, r_bits
+        "N=%d P_len=%u Q_len=%u R_len=%u\n",
+        N,
+        P.length,
+        Q.length,
+        R.length
     );
+    if (print_result){
+        printf("P = ");
+        uint32_t * p_host = new uint32_t[P.length];
+        cudaMemcpy(p_host, P.data, P.length * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        for (int i = P.length - 1; i >= 0; i--) {
+            if (i == P.length - 1) {
+                printf("%x", p_host[i]);
+            } else {
+                printf("%08x", p_host[i]);
+            }
+        }
+        delete [] p_host;
+        printf("\n");
+        printf("Q = ");
+        uint32_t * q_host = new uint32_t[Q.length];
+        cudaMemcpy(q_host, Q.data, Q.length * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        for (int i = Q.length - 1; i >= 0; i--) {
+            if (i == Q.length - 1) {
+                printf("%x", q_host[i]);
+            } else {
+                printf("%08x", q_host[i]);
+            }
+        }
+        delete [] q_host;
+        printf("\n");
+        printf("R = ");
+        uint32_t * r_host = new uint32_t[R.length];
+        cudaMemcpy(r_host, R.data, R.length * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        for (int i = R.length - 1; i >= 0; i--) {
+            if (i == R.length - 1) {
+                printf("%x", r_host[i]);
+            } else {
+                printf("%08x", r_host[i]);
+            }
+        }
+        delete [] r_host;
+        printf("\n");
+    }
     release_array(&P);
     release_array(&Q);
     release_array(&R);
