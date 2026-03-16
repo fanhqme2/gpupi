@@ -737,7 +737,7 @@ int main(int argc, char ** argv){
             total_ntt_ms
         );
         float accounted = total_leaf_ms + total_mul_ms + total_add_ms + total_sub_ms + total_compact_ms;
-        printf("N=%d elapsed_ms=%.3f accounted_ms=%.3f\n", N, elapsed_ms, accounted);
+        printf("N=%d elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n", N, elapsed_ms, accounted, (int)(batch_mp_workspace_size(context) / (1024 * 1024)));
         // release_array(&P);
         // release_array(&Q);
         // release_array(&R);

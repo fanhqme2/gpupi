@@ -1817,16 +1817,16 @@ void batch_mul_ntt(
                 }
                 i = k - 1;
             }else{
-                if (k >= 24){
+                if (k >= 23){
                     int num_blocks = min(((size_t)N) << (k - 11), (size_t)65536);
                     if (i != 0){
-                        fft_level_forward_radix256<<<num_blocks, dim3(16, 64, 1)>>>(
+                        fft_level_forward_radix256<<<num_blocks, dim3(16, 32, 1)>>>(
                             parts_a, // parts_b must be adjacent to it
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
                             N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
                         );
                     }else{
-                        fft_level_forward_radix256_initial<<<num_blocks, dim3(16, 64, 1)>>>(
+                        fft_level_forward_radix256_initial<<<num_blocks, dim3(16, 32, 1)>>>(
                             A, B,
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
