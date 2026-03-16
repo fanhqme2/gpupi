@@ -13,6 +13,8 @@ LIB_SRCS := \
 	batch_mul_ntt.cu \
 	batch_add.cu \
 	batch_sub.cu \
+	batch_shift_add.cu \
+	batch_shift_sub.cu \
 	batch_mul_small.cu \
 	batch_add_small.cu \
 	batch_sub_small.cu \
