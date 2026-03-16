@@ -323,6 +323,18 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     BatchMPArray R_next{};
     BatchMPArray R_prod_1{};
     BatchMPArray R_prod_2{};
+
+    uint32_t * temp_prod_workspace;
+    cudaMalloc(&temp_prod_workspace,(
+        N * 3ull + 
+        N * 4ull +
+        N * 6ull +
+        N * 88ull +
+        N * 72ull
+    ) * 4);
+    if (temp_prod_workspace == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
     
     if (context == nullptr || (N & (N - 1)) != 0) {
         return cudaErrorInvalidValue;
@@ -338,19 +350,19 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         release_array(P);
         release_array(Q);
         release_array(R);
-        release_array(P0);
-        release_array(Q0);
-        release_array(R0);
         release_array(P_next);
         release_array(Q_next);
         release_array(R_next);
-        release_array(R_prod_1);
-        release_array(R_prod_2);
+        cudaFree(temp_prod_workspace);
     };
 
-    P0 = batch_mp_array_create(N, 3);
-    Q0 = batch_mp_array_create(N, 4);
-    R0 = batch_mp_array_create(N, 6);
+    P0 = {.data = temp_prod_workspace, .length = 3, .batch_size = (uint32_t)N,  .stride = 3};
+    temp_prod_workspace += N * 3;
+    Q0 = {.data = temp_prod_workspace, .length = 4, .batch_size = (uint32_t)N,  .stride = 4};
+    temp_prod_workspace += N * 4;
+    R0 = {.data = temp_prod_workspace, .length = 6, .batch_size = (uint32_t)N,  .stride = 6};
+    temp_prod_workspace += N * 6;
+
     P = batch_mp_array_create(N * 16, 3);
     Q = batch_mp_array_create(N * 16, 5); // we ask for 5 size, but will only use 4, for safety
     R = batch_mp_array_create(N * 16, 6);
@@ -406,8 +418,11 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     P_next = batch_mp_array_create(n / 2, 6);
     Q_next = batch_mp_array_create(n / 2, 10);
     R_next = batch_mp_array_create(n / 2, 12);
-    R_prod_1 = batch_mp_array_create(n / 2, 11);
-    R_prod_2 = batch_mp_array_create(n / 2, 9);
+    R_prod_1 = {.data = temp_prod_workspace, .length = 11, .batch_size = (uint32_t)(n / 2),  .stride = 11};
+    temp_prod_workspace += (n / 2) * 11;
+    R_prod_2 = {.data = temp_prod_workspace, .length = 9, .batch_size = (uint32_t)(n / 2),  .stride = 9};
+    temp_prod_workspace += (n / 2) * 9;
+    
     if (P_next.data == nullptr || Q_next.data == nullptr || R_next.data == nullptr ||
         R_prod_1.data == nullptr || R_prod_2.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
@@ -424,7 +439,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         else:
             r = r1 + r2*/
         const bool subtract = (n1 == (uint32_t)n) || (n1 == (n >> 4));
-        //BatchMPArray P_next = batch_mp_array_create(n1 / 2, P.length * 2);
         P_next.batch_size = n1 / 2;
         P_next.length = P.length * 2;
         P_next.stride = P.length * 2;
@@ -445,7 +459,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         CHECK_AND_RETURN(err, release_all());
         err = profile_compact(context, P_next, "P", n1, profiler);
         CHECK_AND_RETURN(err, release_all());
-        // BatchMPArray Q_next = batch_mp_array_create(n1 / 2, Q.length * 2);
         Q_next.batch_size = n1 / 2;
         Q_next.length = Q.length * 2;
         Q_next.stride = Q.length * 2;
@@ -478,7 +491,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             .batch_size = n1 / 2,
             .stride = R.stride * 2
         };
-        //BatchMPArray R_prod_1 = batch_mp_array_create(n1 / 2, R.length + Q.length);
         R_prod_1.batch_size = n1 / 2;
         R_prod_1.length = R.length + Q.length;
         R_prod_1.stride = R.length + Q.length;
@@ -488,7 +500,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
 
         int shift_amount = 15 * ((n / n1) + ((n / n1) >> 4));
 
-        // BatchMPArray R_prod_2 = batch_mp_array_create(n1 / 2, R.length + P.length);
         R_prod_2.batch_size = n1 / 2;
         R_prod_2.length = R.length + P.length;
         R_prod_2.stride = R.length + P.length;
@@ -547,14 +558,10 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             std::swap(R, R_next);
         }
     }
-    release_array(P0);
-    release_array(Q0);
-    release_array(R0);
     release_array(P_next);
     release_array(Q_next);
     release_array(R_next);
-    release_array(R_prod_1);
-    release_array(R_prod_2);
+    cudaFree(temp_prod_workspace);
     return cudaSuccess;
 }
 
