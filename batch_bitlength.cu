@@ -7,9 +7,8 @@
 
 namespace {
 
-constexpr uint32_t kSmallLThreadThreshold = 8u;
+constexpr uint32_t kSmallLThreadThreshold = 32u;
 constexpr uint32_t kLargeLThreshold = 2048u;
-constexpr uint32_t kSmallNThreshold = 84u;
 constexpr uint32_t kChunkSize = 4096u;
 
 enum class LengthMode {
@@ -40,16 +39,18 @@ __global__ void batch_bitlength_thread_kernel(
     uint32_t stride_A
 ) {
     uint32_t local_max = 0u;
+    uint32_t local_max_limb = 0u;
     for (uint32_t idx0 = blockIdx.x * blockDim.x; idx0 < N; idx0 += gridDim.x * blockDim.x) {
         const uint32_t idx = idx0 + threadIdx.x;
         if (idx >= N) continue;
 
         const uint32_t * row = A + (size_t)idx * stride_A;
         uint32_t local = 0u;
-        for (uint32_t offset = 0; offset < L; ++offset) {
+        for (uint32_t offset = 0; offset < L - local_max_limb; ++offset) {
             const uint32_t i = L - 1u - offset;
             const uint32_t word = row[i];
             if (word != 0u) {
+                local_max_limb = i;
                 local = measure_nonzero_word<MODE>(i, word);
                 break;
             }
@@ -118,10 +119,18 @@ __global__ void batch_bitlength_chunk_kernel(
     const uint32_t chunk_count = (L + kChunkSize - 1u) / kChunkSize;
 
     for (uint32_t chunk_idx = blockIdx.x; chunk_idx < chunk_count; chunk_idx += gridDim.x) {
-        const uint32_t chunk_start = chunk_idx * kChunkSize;
+        const uint32_t chunk_start = (chunk_count - 1 - chunk_idx) * kChunkSize;
         const uint32_t chunk_end = min(chunk_start + kChunkSize, L);
 
-        for (uint32_t i = chunk_start + threadIdx.x * 4u; i < chunk_end; i += THREADS * 4u) {
+        //for (uint32_t i = chunk_start + threadIdx.x * 4u; i < chunk_end; i += THREADS * 4u) {
+        for (uint32_t i_inv = threadIdx.x * 4u; i_inv < chunk_end - chunk_start; i_inv += THREADS * 4u) {
+            uint32_t i = chunk_end - 1u - i_inv;
+            if (i <= chunk_start + 3) {
+                i = chunk_start;
+            }else{
+                i = i - 3;
+            }
+
             const uint32_t w0 = row[i];
             if (w0 != 0u) {
                 local_best = max(local_best, measure_nonzero_word<MODE>(i, w0));
@@ -144,6 +153,12 @@ __global__ void batch_bitlength_chunk_kernel(
                     local_best = max(local_best, measure_nonzero_word<MODE>(i + 3u, w3));
                 }
             }
+            if (local_best != 0u) {
+                break;
+            }
+        }
+        if (local_best != 0u) {
+            break;
         }
     }
 
@@ -191,7 +206,7 @@ uint32_t batch_length_max_impl(
         batch_bitlength_thread_kernel<MODE, 128><<<num_blocks, threads_per_block>>>(
             A, d_result, N, L, stride_A
         );
-    } else if (L < kLargeLThreshold || N >= kSmallNThreshold || workspace == nullptr) {
+    } else if (L < kLargeLThreshold) {
         const uint32_t warps_per_block = 8u;
         const uint32_t num_blocks = std::min<uint32_t>((N + warps_per_block - 1u) / warps_per_block, 65535u);
         batch_bitlength_warp_kernel<MODE><<<num_blocks, dim3(32u, warps_per_block, 1u)>>>(
