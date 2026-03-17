@@ -332,14 +332,14 @@ cudaError_t profile_exactdiv(
     } while (0)
 
 // do binary splitting for N * 17 elements, where N is a power of 2
-cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &P, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr){
+cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr){
     // pre-allocate workspace for the 2^28 case
     batch_mp_ensure_workspace(context, 6442450944ull);
 
     BatchMPArray P0 = {};
     BatchMPArray Q0 = {};
     BatchMPArray R0 = {};
-    P = {};
+    BatchMPArray P = {};
     Q = {};
     R = {};
     BatchMPArray P_next{};
@@ -463,26 +463,33 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         else:
             r = r1 + r2*/
         const bool subtract = (n1 == (uint32_t)n) || (n1 == (n >> 4));
-        P_next.batch_size = n1 / 2;
+
+        int ignore_last_P = n1 <= N;
+
+        P_next.batch_size = n1 / 2 - ignore_last_P;
         P_next.length = P.length * 2;
         P_next.stride = P.length * 2;
 
         BatchMPArray P_even = {
             .data = P.data,
             .length = P.length,
-            .batch_size = n1 / 2,
+            .batch_size = n1 / 2 - ignore_last_P,
             .stride = P.stride * 2
         };
         BatchMPArray P_odd = {
             .data = P.data + P.stride,
             .length = P.length,
-            .batch_size = n1 / 2,
+            .batch_size = n1 / 2 - ignore_last_P,
             .stride = P.stride * 2
         };
-        err = profile_mul(context, P_even, P_odd, P_next, "P", n1, profiler);
-        CHECK_AND_RETURN(err, release_all());
-        err = profile_compact(context, P_next, "P", n1, profiler);
-        CHECK_AND_RETURN(err, release_all());
+
+        if (P_odd.batch_size > 0) {
+            err = profile_mul(context, P_even, P_odd, P_next, "P", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            err = profile_compact(context, P_next, "P", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+        }
+
         Q_next.batch_size = n1 / 2;
         Q_next.length = Q.length * 2;
         Q_next.stride = Q.length * 2;
@@ -527,6 +534,8 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         R_prod_2.batch_size = n1 / 2;
         R_prod_2.length = R.length + P.length;
         R_prod_2.stride = R.length + P.length;
+
+        P_even.batch_size = n1 / 2;
 
         err = profile_mul(context, P_even, R_odd, R_prod_2, "P*R", n1, profiler);
         CHECK_AND_RETURN(err, release_all());
@@ -604,6 +613,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             std::swap(R, R_next);
         }
     }
+    release_array(P);
     release_array(P_next);
     release_array(Q_next);
     release_array(R_next);
@@ -690,7 +700,6 @@ int main(int argc, char ** argv){
         return 1;
     }
 
-    BatchMPArray P{};
     BatchMPArray Q{};
     BatchMPArray R{};
     StageProfiler profiler{};
@@ -704,12 +713,11 @@ int main(int argc, char ** argv){
         return 1;
     }
     if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
-        !check_cuda(binary_split_batched(context, N, P, Q, R, profile_stages ? &profiler : nullptr), "binary_split_batched") ||
+        !check_cuda(binary_split_batched(context, N, Q, R, profile_stages ? &profiler : nullptr), "binary_split_batched") ||
         !check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)") ||
         !check_cuda(cudaEventSynchronize(stop_event), "cudaEventSynchronize(stop)")) {
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
-        release_array(&P);
         release_array(&Q);
         release_array(&R);
         batch_mp_destroy(context);
@@ -719,7 +727,6 @@ int main(int argc, char ** argv){
     if (!check_cuda(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime")) {
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
-        release_array(&P);
         release_array(&Q);
         release_array(&R);
         batch_mp_destroy(context);
@@ -728,9 +735,8 @@ int main(int argc, char ** argv){
     cudaEventDestroy(start_event);
     cudaEventDestroy(stop_event);
 
-    if (P.batch_size != 1 || Q.batch_size != 1 || R.batch_size != 1) {
-        fprintf(stderr, "Unexpected output batch size: P=%u Q=%u R=%u\n", P.batch_size, Q.batch_size, R.batch_size);
-        release_array(&P);
+    if (Q.batch_size != 1 || R.batch_size != 1) {
+        fprintf(stderr, "Unexpected output batch size: Q=%u R=%u\n", Q.batch_size, R.batch_size);
         release_array(&Q);
         release_array(&R);
         batch_mp_destroy(context);
@@ -738,7 +744,6 @@ int main(int argc, char ** argv){
     }
     if (benchmark_only) {
         printf("N=%d elapsed_ms=%.3f\n", N, elapsed_ms);
-        release_array(&P);
         release_array(&Q);
         release_array(&R);
         batch_mp_destroy(context);
@@ -795,7 +800,6 @@ int main(int argc, char ** argv){
         );
         float accounted = total_leaf_ms + total_mul_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
         printf("N=%d elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n", N, elapsed_ms, accounted, (int)(batch_mp_workspace_size(context) / (1024 * 1024)));
-        // release_array(&P);
         // release_array(&Q);
         // release_array(&R);
         // batch_mp_destroy(context);
@@ -803,25 +807,12 @@ int main(int argc, char ** argv){
     }
 
     printf(
-        "N=%d P_len=%u Q_len=%u R_len=%u\n",
+        "N=%d Q_len=%u R_len=%u\n",
         N,
-        P.length,
         Q.length,
         R.length
     );
     if (print_result){
-        printf("P = ");
-        uint32_t * p_host = new uint32_t[P.length];
-        cudaMemcpy(p_host, P.data, P.length * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-        for (int i = P.length - 1; i >= 0; i--) {
-            if (i == P.length - 1) {
-                printf("%x", p_host[i]);
-            } else {
-                printf("%08x", p_host[i]);
-            }
-        }
-        delete [] p_host;
-        printf("\n");
         printf("Q = ");
         uint32_t * q_host = new uint32_t[Q.length];
         cudaMemcpy(q_host, Q.data, Q.length * sizeof(uint32_t), cudaMemcpyDeviceToHost);
@@ -847,7 +838,6 @@ int main(int argc, char ** argv){
         delete [] r_host;
         printf("\n");
     }
-    release_array(&P);
     release_array(&Q);
     release_array(&R);
     batch_mp_destroy(context);

@@ -72,9 +72,18 @@ def binary_split(i, j, is_initial = False):
         r = r1 - r2
     else:
         r = r1 + r2
+    
+    if j - i == 17:
+        q = q // 130016887243243
+        r = r // 130016887243243
+
     if is_initial:
         return q, r
     p = p1 * p2
+
+    if j - i == 17:
+        p = p // 130016887243243
+
     return p, q, r
 
 
@@ -104,11 +113,11 @@ def int_to_limbs(value):
 
 
 def parse_cuda_output(text):
-    matches = dict(re.findall(r"([PQR])\s*=\s*([0-9a-fA-F]+)", text))
-    missing = [name for name in ("P", "Q", "R") if name not in matches]
+    matches = dict(re.findall(r"([QR])\s*=\s*([0-9a-fA-F]+)", text))
+    missing = [name for name in ("Q", "R") if name not in matches]
     if missing:
         raise ValueError("missing values in CUDA output: %s" % ", ".join(missing))
-    return {name: mpz(matches[name], 16) for name in ("P", "Q", "R")}
+    return {name: mpz(matches[name], 16) for name in ("Q", "R")}
 
 
 def print_limb_mismatch(name, expected, actual, window=2):
@@ -152,38 +161,12 @@ def compare_value(name, expected, actual):
     print_limb_mismatch(name, expected, actual)
     return False
 
-
-def compare_up_to_common_scale(expected, actual):
-    if actual["Q"] == 0:
-        print("Actual Q is zero")
-        return False
-    scale, rem = divmod(expected["Q"], actual["Q"])
-    if rem != 0:
-        print("Q does not divide expected Q exactly")
-        return False
-    ok = True
-    for name in ("P", "R"):
-        scaled = actual[name] * scale
-        if scaled == expected[name]:
-            print("%s matches after common scaling" % name)
-        else:
-            print("%s mismatch after common scaling" % name)
-            print_limb_mismatch(name, expected[name], scaled)
-            ok = False
-    if actual["Q"] * scale == expected["Q"]:
-        print("Q matches after common scaling")
-    else:
-        print("Q mismatch after common scaling")
-        ok = False
-    print("common_scale_bits=%d common_scale_limbs=%d" % (scale.bit_length(), limb_length(scale)))
-    return ok
-
 def main():
     N = int(sys.argv[1])
     binary = sys.argv[2] if len(sys.argv) >= 3 else "./pi_bs_gpu"
 
-    p, q, r = binary_split(0, N * 17)
-    expected = {"P": p, "Q": q, "R": r}
+    q, r = binary_split(0, N * 17, is_initial=True)
+    expected = {"Q": q, "R": r}
 
     result = subprocess.run(
         [binary, str(N)],
@@ -193,10 +176,10 @@ def main():
     )
     actual = parse_cuda_output(result.stdout)
 
-    ok = compare_up_to_common_scale(expected, actual)
+    ok = compare_value("Q", expected['Q'], actual['Q']) and compare_value("R", expected['R'], actual['R'])
 
     if ok:
-        print("All values match up to a shared scale factor for N=%d" % N)
+        print("All values match for N=%d" % N)
     else:
         sys.exit(1)
 
