@@ -184,6 +184,10 @@ cudaError_t profile_stage(
     StageProfiler * profiler,
     Fn && fn
 ) {
+    if (profiler == nullptr) {
+        return fn();
+    }
+
     cudaEvent_t start = nullptr;
     cudaEvent_t stop = nullptr;
     cudaError_t err = cudaEventCreate(&start);
@@ -743,7 +747,13 @@ int main(int argc, char ** argv){
         return 1;
     }
     if (benchmark_only) {
-        printf("N=%d elapsed_ms=%.3f\n", N, elapsed_ms);
+        printf(
+            "N=%d Q_len=%u R_len=%u ellapsed_ms=%.3f\n",
+            N,
+            Q.length,
+            R.length,
+            elapsed_ms
+        );
         release_array(&Q);
         release_array(&R);
         batch_mp_destroy(context);
