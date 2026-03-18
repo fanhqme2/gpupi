@@ -326,6 +326,72 @@ cudaError_t profile_exactdiv(
     );
 }
 
+cudaError_t profile_mul_small(
+    BatchMPContext * context,
+    BatchMPArray A,
+    uint32_t multiplier,
+    BatchMPArray C,
+    const char * label,
+    uint32_t digits,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "mul_small",
+        label,
+        digits,
+        A.batch_size,
+        A.length,
+        1,
+        false,
+        profiler,
+        [&]() { return batch_mp_mul_small(context, A, multiplier, C); }
+    );
+}
+
+cudaError_t profile_add(
+    BatchMPContext * context,
+    BatchMPArray A,
+    BatchMPArray B,
+    BatchMPArray C,
+    const char * label,
+    uint32_t digits,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "add",
+        label,
+        digits,
+        A.batch_size,
+        A.length,
+        B.length,
+        false,
+        profiler,
+        [&]() { return batch_mp_add(context, A, B, C); }
+    );
+}
+
+cudaError_t profile_shift_bits(
+    BatchMPContext * context,
+    BatchMPArray A,
+    BatchMPArray B,
+    int32_t shift_bits,
+    const char * label,
+    uint32_t digits,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "shift",
+        label,
+        digits,
+        A.batch_size,
+        A.length,
+        0,
+        false,
+        profiler,
+        [&]() { return batch_mp_shift_bits(context, A, B, shift_bits); }
+    );
+}
+
 }  // namespace
 
 #define CHECK_AND_RETURN(err, cleanup) \
@@ -740,6 +806,73 @@ bool print_validation_summary(const BatchMPArray &Q, const BatchMPArray &R) {
     return true;
 }
 
+uint32_t limb_bit_length(uint32_t limb) {
+    return limb == 0 ? 0u : 32u - (uint32_t)__builtin_clz(limb);
+}
+
+uint32_t compute_bit_length(const uint32_t * limbs, uint32_t length) {
+    while (length > 0 && limbs[length - 1] == 0) {
+        --length;
+    }
+    if (length == 0) {
+        return 0;
+    }
+    return (length - 1) * 32u + limb_bit_length(limbs[length - 1]);
+}
+
+uint32_t mod_mul_u32(uint32_t a, uint32_t b) {
+    return (uint32_t)(((uint64_t)a * b) % kValidationMod);
+}
+
+uint32_t mod_sub_u32(uint32_t a, uint32_t b) {
+    return (a >= b) ? (a - b) : (uint32_t)(a + kValidationMod - b);
+}
+
+uint64_t compute_low64(const uint32_t * limbs, uint32_t length) {
+    if (length == 0) {
+        return 0;
+    }
+    uint64_t value = limbs[0];
+    if (length > 1) {
+        value |= (uint64_t)limbs[1] << 32;
+    }
+    return value;
+}
+
+bool print_sqrt_validation_summary(const BatchMPArray &P, const BatchMPArray &Q) {
+    uint32_t * p_host = nullptr;
+    uint32_t * q_host = nullptr;
+    if (!copy_device_array_to_host(P, &p_host) || !copy_device_array_to_host(Q, &q_host)) {
+        delete [] p_host;
+        delete [] q_host;
+        return false;
+    }
+
+    print_hex_preview_with_hash("P_preview", p_host, P.length);
+    print_hex_preview_with_hash("Q_preview", q_host, Q.length);
+
+    const uint32_t p_hash = compute_mod_hash(p_host, P.length);
+    const uint32_t q_hash = compute_mod_hash(q_host, Q.length);
+    const uint32_t norm_mod = mod_sub_u32(mod_mul_u32(p_hash, p_hash), mod_mul_u32(10005u, mod_mul_u32(q_hash, q_hash)));
+
+    const uint64_t p_low64 = compute_low64(p_host, P.length);
+    const uint64_t q_low64 = compute_low64(q_host, Q.length);
+    const uint64_t norm_low64 = (uint64_t)((unsigned __int128)p_low64 * p_low64 - (unsigned __int128)10005u * q_low64 * q_low64);
+
+    printf(
+        "validation P_bits=%u Q_bits=%u norm_mod_%u=%u norm_low64=0x%016llx expected_norm=1\n",
+        compute_bit_length(p_host, P.length),
+        compute_bit_length(q_host, Q.length),
+        kValidationMod,
+        norm_mod,
+        (unsigned long long)norm_low64
+    );
+
+    delete [] p_host;
+    delete [] q_host;
+    return true;
+}
+
 bool print_full_hex_value(const char * label, const BatchMPArray & array) {
     uint32_t * host = nullptr;
     if (!copy_device_array_to_host(array, &host)) {
@@ -763,7 +896,8 @@ bool print_full_hex_value(const char * label, const BatchMPArray & array) {
     return true;
 }
 
-cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q) {
+cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q, StageProfiler * profiler = nullptr) {
+    batch_mp_ensure_workspace(context, 6442450944ull >> 2);
     /*
     p_15 = mpz(4001)
     q_15 = mpz(40)
@@ -851,6 +985,7 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
     Q = {.data = cur_Q, .length = 1, .batch_size = 1, .stride = 1};
     while (valid_digits < target_digits){
         valid_digits *= 2;
+        const uint32_t stage_digits = (uint32_t)valid_digits;
         BatchMPArray next_PQ = {
             .data = cur_work_memory,
             .length = P.length + Q.length,
@@ -858,9 +993,9 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
             .stride = P.length + Q.length
         };
         cur_work_memory += P.length + Q.length;
-        err = batch_mp_mul(context, P, Q, next_PQ);
+        err = profile_mul(context, P, Q, next_PQ, "P*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
-        err = next_PQ.compact(context);
+        err = profile_compact(context, next_PQ, "P*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
         
         BatchMPArray next_Q = {
@@ -875,9 +1010,9 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
         }else{
             next_Q.data = d_Q;
         }
-        err = batch_mp_shift_bits(context, next_PQ, next_Q, 1);
+        err = profile_shift_bits(context, next_PQ, next_Q, 1, "2*P*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
-        err = next_Q.compact(context);
+        err = profile_compact(context, next_Q, "Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
 
         BatchMPArray next_PP = {
@@ -887,9 +1022,9 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
             .stride = P.length * 2
         };
         cur_work_memory += next_PP.length;
-        err = batch_mp_mul(context, P, P, next_PP);
+        err = profile_mul(context, P, P, next_PP, "P*P", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
-        err = next_PP.compact(context);
+        err = profile_compact(context, next_PP, "P*P", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
 
         BatchMPArray next_QQ = {
@@ -899,9 +1034,9 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
             .stride = Q.length * 2
         };
         cur_work_memory += next_QQ.length;
-        err = batch_mp_mul(context, Q, Q, next_QQ);
+        err = profile_mul(context, Q, Q, next_QQ, "Q*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
-        err = next_QQ.compact(context);
+        err = profile_compact(context, next_QQ, "Q*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
 
         BatchMPArray next_QQ_10005 = {
@@ -911,9 +1046,9 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
             .stride = next_QQ.length + 1
         };
         cur_work_memory += next_QQ_10005.length;
-        err = batch_mp_mul_small(context, next_QQ, 10005, next_QQ_10005);
+        err = profile_mul_small(context, next_QQ, 10005, next_QQ_10005, "10005*Q*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
-        err = next_QQ_10005.compact(context);
+        err = profile_compact(context, next_QQ_10005, "10005*Q*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
         BatchMPArray next_P = {
             .data = nullptr,
@@ -927,9 +1062,9 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
         }else{
             next_P.data = d_P;
         }
-        err = batch_mp_add(context, next_PP, next_QQ_10005, next_P);
+        err = profile_add(context, next_PP, next_QQ_10005, next_P, "P*P+10005*Q*Q", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
-        err = next_P.compact(context);
+        err = profile_compact(context, next_P, "P", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
 
         P = next_P;
@@ -1142,8 +1277,23 @@ int main_bs(int argc, char ** argv){
 int main_sqrt_10005(int argc, char ** argv){
     int target_digits = 0;
     if (argc < 2 || !parse_int_arg(argv[1], &target_digits) || target_digits < 0) {
-        fprintf(stderr, "Usage: %s <target_digits>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
         return 1;
+    }
+    bool benchmark_only = false;
+    bool profile_stages = false;
+    bool print_result = true;
+    if (argc >= 3) {
+        if (strcmp(argv[2], "--benchmark") == 0) {
+            benchmark_only = true;
+            print_result = false;
+        } else if (strcmp(argv[2], "--profile-stages") == 0) {
+            profile_stages = true;
+            print_result = false;
+        } else {
+            fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
+            return 1;
+        }
     }
 
     BatchMPContext * context = batch_mp_init();
@@ -1154,12 +1304,39 @@ int main_sqrt_10005(int argc, char ** argv){
 
     BatchMPArray P{};
     BatchMPArray Q{};
-    if (!check_cuda(sqrt_10005(context, target_digits, P, Q), "sqrt_10005")) {
+    StageProfiler profiler{};
+    cudaEvent_t start_event = nullptr;
+    cudaEvent_t stop_event = nullptr;
+    if (!check_cuda(cudaEventCreate(&start_event), "cudaEventCreate(start)") ||
+        !check_cuda(cudaEventCreate(&stop_event), "cudaEventCreate(stop)")) {
+        if (start_event != nullptr) cudaEventDestroy(start_event);
+        if (stop_event != nullptr) cudaEventDestroy(stop_event);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
+        !check_cuda(sqrt_10005(context, target_digits, P, Q, profile_stages ? &profiler : nullptr), "sqrt_10005") ||
+        !check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)") ||
+        !check_cuda(cudaEventSynchronize(stop_event), "cudaEventSynchronize(stop)")) {
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
         release_array(&P);
         release_array(&Q);
         batch_mp_destroy(context);
         return 1;
     }
+    float elapsed_ms = 0.0f;
+    if (!check_cuda(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime")) {
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 1;
+    }
+    cudaEventDestroy(start_event);
+    cudaEventDestroy(stop_event);
 
     if (P.batch_size != 1 || Q.batch_size != 1) {
         fprintf(stderr, "Unexpected output batch size: P=%u Q=%u\n", P.batch_size, Q.batch_size);
@@ -1169,13 +1346,108 @@ int main_sqrt_10005(int argc, char ** argv){
         return 1;
     }
 
+    if (benchmark_only) {
+        printf(
+            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            target_digits,
+            P.length,
+            Q.length,
+            elapsed_ms,
+            (int)(batch_mp_workspace_size(context) / (1024 * 1024))
+        );
+        if (!print_sqrt_validation_summary(P, Q)) {
+            release_array(&P);
+            release_array(&Q);
+            batch_mp_destroy(context);
+            return 1;
+        }
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 0;
+    }
+
+    if (profile_stages) {
+        float total_mul_ms = 0.0f;
+        float total_mul_small_ms = 0.0f;
+        float total_shift_ms = 0.0f;
+        float total_add_ms = 0.0f;
+        float total_compact_ms = 0.0f;
+        float total_ntt_ms = 0.0f;
+        for (int idx = 0; idx < profiler.count; ++idx) {
+            const StageProfileEntry & entry = profiler.entries[idx];
+            if (strcmp(entry.kind, "mul") == 0) {
+                total_mul_ms += entry.elapsed_ms;
+                if (entry.uses_ntt) {
+                    total_ntt_ms += entry.elapsed_ms;
+                }
+            } else if (strcmp(entry.kind, "mul_small") == 0) {
+                total_mul_small_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "shift") == 0) {
+                total_shift_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "add") == 0) {
+                total_add_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "compact") == 0) {
+                total_compact_ms += entry.elapsed_ms;
+            }
+            printf(
+                "stage[%03d] kind=%9s label=%18s digits=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
+                idx,
+                entry.kind,
+                entry.label,
+                entry.n1,
+                entry.batch_size,
+                entry.lhs_length,
+                entry.rhs_length,
+                entry.elapsed_ms,
+                entry.uses_ntt ? 1 : 0
+            );
+        }
+        const float accounted_ms = total_mul_ms + total_mul_small_ms + total_shift_ms + total_add_ms + total_compact_ms;
+        printf(
+            "mul_total_ms=%.3f mul_small_total_ms=%.3f shift_total_ms=%.3f add_total_ms=%.3f compact_total_ms=%.3f ntt_total_ms=%.3f\n",
+            total_mul_ms,
+            total_mul_small_ms,
+            total_shift_ms,
+            total_add_ms,
+            total_compact_ms,
+            total_ntt_ms
+        );
+        printf(
+            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            target_digits,
+            P.length,
+            Q.length,
+            elapsed_ms,
+            accounted_ms,
+            (int)(batch_mp_workspace_size(context) / (1024 * 1024))
+        );
+        if (!print_sqrt_validation_summary(P, Q)) {
+            release_array(&P);
+            release_array(&Q);
+            batch_mp_destroy(context);
+            return 1;
+        }
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 0;
+    }
+
     printf(
-        "target_digits=%d P_len=%u Q_len=%u\n",
+        "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f\n",
         target_digits,
         P.length,
-        Q.length
+        Q.length,
+        elapsed_ms
     );
-    if (!print_full_hex_value("P", P) || !print_full_hex_value("Q", Q)) {
+    if (print_result && (!print_full_hex_value("P", P) || !print_full_hex_value("Q", Q))) {
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 1;
+    }
+    if (!print_sqrt_validation_summary(P, Q)) {
         release_array(&P);
         release_array(&Q);
         batch_mp_destroy(context);
@@ -1189,6 +1461,6 @@ int main_sqrt_10005(int argc, char ** argv){
 }
 
 int main(int argc, char ** argv) {
-    return main_bs(argc, argv);
-    //return main_sqrt_10005(argc, argv);
+    //return main_bs(argc, argv);
+    return main_sqrt_10005(argc, argv);
 }
