@@ -136,6 +136,7 @@ __global__ void batch_mul_small_single_block_kernel(
     uint32_t stride_C
 ) {
     __shared__ ushort2 carry_info[32];
+    __shared__ ushort block_carry_shared;
 
     const uint32_t linear_tid = threadIdx.y * blockDim.x + threadIdx.x;
     const uint32_t threads_per_block = blockDim.x * blockDim.y;
@@ -143,7 +144,10 @@ __global__ void batch_mul_small_single_block_kernel(
     for (uint32_t idx = blockIdx.x; idx < N; idx += gridDim.x) {
         const uint32_t * a_row = A + (size_t)idx * stride_A;
         uint32_t * c_row = C + (size_t)idx * stride_C;
-        ushort block_carry = 0;
+        if (linear_tid == 0) {
+            block_carry_shared = 0;
+        }
+        __syncthreads();
 
         for (uint32_t i0 = 0; i0 < L_c; i0 += threads_per_block * 2u) {
             const uint32_t i = i0 + linear_tid * 2u;
@@ -199,7 +203,7 @@ __global__ void batch_mul_small_single_block_kernel(
                     }
                 }
                 if (threadIdx.x < blockDim.y) {
-                    ushort compound = warp_carry.y + block_carry;
+                    ushort compound = warp_carry.y + block_carry_shared;
                     warp_carry.x += compound >> 2;
                     warp_carry.y = 0;
                     carry_info[threadIdx.x] = warp_carry;
@@ -208,11 +212,11 @@ __global__ void batch_mul_small_single_block_kernel(
             __syncthreads();
 
             if (threadIdx.y < blockDim.y) {
-                ushort compound = carry.y + ((threadIdx.y > 0) ? carry_info[threadIdx.y - 1].x : block_carry);
+                ushort compound = carry.y + ((threadIdx.y > 0) ? carry_info[threadIdx.y - 1].x : block_carry_shared);
                 carry.x += compound >> 2;
                 carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
                 if (threadIdx.x == 0) {
-                    carry.x = (threadIdx.y == 0) ? block_carry : carry_info[threadIdx.y - 1].x;
+                    carry.x = (threadIdx.y == 0) ? block_carry_shared : carry_info[threadIdx.y - 1].x;
                 }
                 r0_value = add_cc(r0_value, (uint32_t)carry.x);
                 r1_value = addc_cc(r1_value, 0u);
@@ -226,7 +230,7 @@ __global__ void batch_mul_small_single_block_kernel(
             }
 
             if (linear_tid == 0) {
-                block_carry = carry_info[blockDim.y - 1].x;
+                block_carry_shared = carry_info[blockDim.y - 1].x;
             }
             __syncthreads();
         }
@@ -245,112 +249,110 @@ __global__ void batch_mul_small_reduce_blocks_kernel(
     uint32_t stride_C
 ) {
     __shared__ ushort2 carry_info[32];
-    const uint32_t number_idx = blockIdx.y;
-    if (number_idx >= N) return;
-
     const uint32_t linear_tid = threadIdx.y * blockDim.x + threadIdx.x;
     const uint32_t threads_per_block = blockDim.x * blockDim.y;
     const uint32_t blocks_per_num = (L_c + kChunkSize - 1u) / kChunkSize;
+    for (uint32_t number_idx = blockIdx.y; number_idx < N; number_idx += gridDim.y) {
+        const uint32_t * a_row = A + (size_t)number_idx * stride_A;
+        uint32_t * c_base = C + (size_t)number_idx * stride_C;
+        ushort2 * carry_base = block_carry_summary + (size_t)number_idx * blocks_per_num;
 
-    const uint32_t * a_row = A + (size_t)number_idx * stride_A;
-    uint32_t * c_base = C + (size_t)number_idx * stride_C;
-    ushort2 * carry_base = block_carry_summary + (size_t)number_idx * blocks_per_num;
+        for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
+             chunk_start < L_c;
+             chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
+            const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
+            uint32_t * c_row = c_base + chunk_start;
+            ushort2 block_summary = make_ushort2(0, 0);
 
-    for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
-         chunk_start < L_c;
-         chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
-        const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
-        uint32_t * c_row = c_base + chunk_start;
-        ushort2 block_summary = make_ushort2(0, 0);
+            for (uint32_t i0 = 0; i0 < chunk_len; i0 += threads_per_block * 2u) {
+                const uint32_t i = i0 + linear_tid * 2u;
+                const uint32_t g0 = chunk_start + i;
+                const uint32_t g1 = g0 + 1u;
+                uint32_t r0_value = 0u;
+                uint32_t r1_value = 0u;
+                uint32_t c0_value = 0u;
+                uint32_t c1_value = 0u;
+                ushort2 carry;
 
-        for (uint32_t i0 = 0; i0 < chunk_len; i0 += threads_per_block * 2u) {
-            const uint32_t i = i0 + linear_tid * 2u;
-            const uint32_t g0 = chunk_start + i;
-            const uint32_t g1 = g0 + 1u;
-            uint32_t r0_value = 0u;
-            uint32_t r1_value = 0u;
-            uint32_t c0_value = 0u;
-            uint32_t c1_value = 0u;
-            ushort2 carry;
-
-            if (g0 < L_a && i < chunk_len) {
-                uint32_t hi_unused;
-                mul_word_parts(a_row[g0], B, r0_value, hi_unused);
-                c1_value = hi_unused;
-            }
-            if (g1 < L_a && i + 1u < chunk_len) {
-                uint32_t hi_unused;
-                mul_word_parts(a_row[g1], B, r1_value, hi_unused);
-            }
-            if (g0 > 0u && g0 - 1u < L_a && i < chunk_len) {
-                c0_value = (uint32_t)(((uint64_t)a_row[g0 - 1u] * (uint64_t)B) >> 32);
-            }
-
-            r0_value = add_cc(r0_value, c0_value);
-            r1_value = addc_cc(r1_value, c1_value);
-            carry.x = addc(0, 0);
-            add_cc(r0_value, 2u);
-            addc_cc(r1_value, 0u);
-            if (addc(0, 0)) {
-                carry.y = r0_value & 3u;
-            } else {
-                carry.y = 0;
-            }
-
-            for (int delta = 1; delta < 32; delta *= 2) {
-                const ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
-                if (threadIdx.x >= delta) {
-                    carry = combine_carry_summary(carry, carry_prev);
+                if (g0 < L_a && i < chunk_len) {
+                    uint32_t hi_unused;
+                    mul_word_parts(a_row[g0], B, r0_value, hi_unused);
+                    c1_value = hi_unused;
                 }
-            }
-            if (threadIdx.x == 31) {
-                carry_info[threadIdx.y] = carry;
-            }
-            __syncthreads();
+                if (g1 < L_a && i + 1u < chunk_len) {
+                    uint32_t hi_unused;
+                    mul_word_parts(a_row[g1], B, r1_value, hi_unused);
+                }
+                if (g0 > 0u && g0 - 1u < L_a && i < chunk_len) {
+                    c0_value = (uint32_t)(((uint64_t)a_row[g0 - 1u] * (uint64_t)B) >> 32);
+                }
 
-            if (threadIdx.y == 0) {
-                ushort2 warp_carry = (threadIdx.x < blockDim.y) ? carry_info[threadIdx.x] : make_ushort2(0, 0);
+                r0_value = add_cc(r0_value, c0_value);
+                r1_value = addc_cc(r1_value, c1_value);
+                carry.x = addc(0, 0);
+                add_cc(r0_value, 2u);
+                addc_cc(r1_value, 0u);
+                if (addc(0, 0)) {
+                    carry.y = r0_value & 3u;
+                } else {
+                    carry.y = 0;
+                }
+
                 for (int delta = 1; delta < 32; delta *= 2) {
-                    const ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(warp_carry, delta);
-                    if (threadIdx.x < blockDim.y && threadIdx.x >= delta) {
-                        warp_carry = combine_carry_summary(warp_carry, carry_prev);
+                    const ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(carry, delta);
+                    if (threadIdx.x >= delta) {
+                        carry = combine_carry_summary(carry, carry_prev);
                     }
                 }
-                if (threadIdx.x < blockDim.y) {
-                    carry_info[threadIdx.x] = warp_carry;
+                if (threadIdx.x == 31) {
+                    carry_info[threadIdx.y] = carry;
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            if (threadIdx.y < blockDim.y) {
-                ushort compound = carry.y + ((threadIdx.y > 0) ? carry_info[threadIdx.y - 1].x : 0);
-                carry.x += compound >> 2;
-            }
-            carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
-            if (threadIdx.x == 0) {
-                carry.x = (threadIdx.y == 0) ? 0 : carry_info[threadIdx.y - 1].x;
-            }
-            r0_value = add_cc(r0_value, (uint32_t)carry.x);
-            r1_value = addc_cc(r1_value, 0u);
+                if (threadIdx.y == 0) {
+                    ushort2 warp_carry = (threadIdx.x < blockDim.y) ? carry_info[threadIdx.x] : make_ushort2(0, 0);
+                    for (int delta = 1; delta < 32; delta *= 2) {
+                        const ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(warp_carry, delta);
+                        if (threadIdx.x < blockDim.y && threadIdx.x >= delta) {
+                            warp_carry = combine_carry_summary(warp_carry, carry_prev);
+                        }
+                    }
+                    if (threadIdx.x < blockDim.y) {
+                        carry_info[threadIdx.x] = warp_carry;
+                    }
+                }
+                __syncthreads();
 
-            if (i < chunk_len) {
-                c_row[i] = r0_value;
-            }
-            if (i + 1u < chunk_len) {
-                c_row[i + 1u] = r1_value;
+                if (threadIdx.y < blockDim.y) {
+                    ushort compound = carry.y + ((threadIdx.y > 0) ? carry_info[threadIdx.y - 1].x : 0);
+                    carry.x += compound >> 2;
+                }
+                carry = cuda::device::warp_shuffle_up<32, ushort2>(carry, 1);
+                if (threadIdx.x == 0) {
+                    carry.x = (threadIdx.y == 0) ? 0 : carry_info[threadIdx.y - 1].x;
+                }
+                r0_value = add_cc(r0_value, (uint32_t)carry.x);
+                r1_value = addc_cc(r1_value, 0u);
+
+                if (i < chunk_len) {
+                    c_row[i] = r0_value;
+                }
+                if (i + 1u < chunk_len) {
+                    c_row[i + 1u] = r1_value;
+                }
+
+                __syncthreads();
+                if (linear_tid == 0) {
+                    block_summary = carry_info[blockDim.y - 1];
+                }
+                __syncthreads();
             }
 
-            __syncthreads();
             if (linear_tid == 0) {
-                block_summary = carry_info[blockDim.y - 1];
+                carry_base[chunk_idx] = block_summary;
             }
             __syncthreads();
         }
-
-        if (linear_tid == 0) {
-            carry_base[chunk_idx] = block_summary;
-        }
-        __syncthreads();
     }
 }
 
@@ -417,43 +419,43 @@ __global__ void batch_mul_small_apply_blocks_kernel(
     uint32_t stride_C
 ) {
     __shared__ uint32_t carry_info[32];
-    const uint32_t number_idx = blockIdx.y;
-    if (number_idx >= N) return;
-
     const uint32_t blocks_per_num = (L_c + kChunkSize - 1u) / kChunkSize;
-    const ushort2 * carry_base = block_carry_summary + (size_t)number_idx * blocks_per_num;
-    uint32_t * c_base = C + (size_t)number_idx * stride_C;
+    for (uint32_t number_idx = blockIdx.y; number_idx < N; number_idx += gridDim.y) {
+        const ushort2 * carry_base = block_carry_summary + (size_t)number_idx * blocks_per_num;
+        uint32_t * c_base = C + (size_t)number_idx * stride_C;
 
-    for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
-         chunk_start < L_c;
-         chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
-        const uint32_t carry_in = carry_base[chunk_idx].x;
-        if (carry_in == 0) {
-            continue;
-        }
-
-        const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
-        uint32_t * c_row = c_base + chunk_start;
-
-        for (uint32_t i0 = 0; i0 < chunk_len; i0 += blockDim.x * blockDim.y * 2u) {
-            const uint32_t i = i0 + (threadIdx.y * 32u + threadIdx.x) * 2u;
-            uint32_t r0_value = (i < chunk_len) ? c_row[i] : 0u;
-            uint32_t r1_value = (i + 1u < chunk_len) ? c_row[i + 1u] : 0u;
-            uint32_t c0_value = (i == 0 && i0 == 0) ? carry_in : 0u;
-            uint32_t c1_value = 0u;
-            const uint32_t original = r0_value;
-
-            batch_mul_add_64_all_warp<32>(r0_value, r1_value, c0_value, c1_value, carry_info);
-
-            if (r0_value != original || c0_value != 0u) {
-                if (i < chunk_len) {
-                    c_row[i] = r0_value;
-                }
-                if (i + 1u < chunk_len) {
-                    c_row[i + 1u] = r1_value;
-                }
+        for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
+             chunk_start < L_c;
+             chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
+            const uint32_t carry_in = carry_base[chunk_idx].x;
+            if (carry_in == 0) {
+                continue;
             }
-            __syncthreads();
+
+            const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
+            uint32_t * c_row = c_base + chunk_start;
+
+            for (uint32_t i0 = 0; i0 < chunk_len; i0 += blockDim.x * blockDim.y * 2u) {
+                const uint32_t i = i0 + (threadIdx.y * 32u + threadIdx.x) * 2u;
+                uint32_t r0_value = (i < chunk_len) ? c_row[i] : 0u;
+                uint32_t r1_value = (i + 1u < chunk_len) ? c_row[i + 1u] : 0u;
+                uint32_t c0_value = (i == 0 && i0 == 0) ? carry_in : 0u;
+                uint32_t c1_value = 0u;
+                const uint32_t original0 = r0_value;
+                const uint32_t original1 = r1_value;
+
+                batch_mul_add_64_all_warp<32>(r0_value, r1_value, c0_value, c1_value, carry_info);
+
+                if (r0_value != original0 || r1_value != original1 || c0_value != 0u || c1_value != 0u) {
+                    if (i < chunk_len) {
+                        c_row[i] = r0_value;
+                    }
+                    if (i + 1u < chunk_len) {
+                        c_row[i + 1u] = r1_value;
+                    }
+                }
+                __syncthreads();
+            }
         }
     }
 }

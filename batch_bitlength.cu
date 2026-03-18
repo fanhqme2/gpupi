@@ -109,71 +109,68 @@ __global__ void batch_bitlength_chunk_kernel(
 ) {
     __shared__ uint32_t shared_best[THREADS];
 
-    const uint32_t idx = blockIdx.y;
-    if (idx >= N) {
-        return;
-    }
-
-    const uint32_t * row = A + (size_t)idx * stride_A;
-    uint32_t local_best = 0u;
     const uint32_t chunk_count = (L + kChunkSize - 1u) / kChunkSize;
+    for (uint32_t idx = blockIdx.y; idx < N; idx += gridDim.y) {
+        const uint32_t * row = A + (size_t)idx * stride_A;
+        uint32_t local_best = 0u;
 
-    for (uint32_t chunk_idx = blockIdx.x; chunk_idx < chunk_count; chunk_idx += gridDim.x) {
-        const uint32_t chunk_start = (chunk_count - 1 - chunk_idx) * kChunkSize;
-        const uint32_t chunk_end = min(chunk_start + kChunkSize, L);
+        for (uint32_t chunk_idx = blockIdx.x; chunk_idx < chunk_count; chunk_idx += gridDim.x) {
+            const uint32_t chunk_start = (chunk_count - 1 - chunk_idx) * kChunkSize;
+            const uint32_t chunk_end = min(chunk_start + kChunkSize, L);
 
-        //for (uint32_t i = chunk_start + threadIdx.x * 4u; i < chunk_end; i += THREADS * 4u) {
-        for (uint32_t i_inv = threadIdx.x * 4u; i_inv < chunk_end - chunk_start; i_inv += THREADS * 4u) {
-            uint32_t i = chunk_end - 1u - i_inv;
-            if (i <= chunk_start + 3) {
-                i = chunk_start;
-            }else{
-                i = i - 3;
-            }
-
-            const uint32_t w0 = row[i];
-            if (w0 != 0u) {
-                local_best = max(local_best, measure_nonzero_word<MODE>(i, w0));
-            }
-            if (i + 1u < chunk_end) {
-                const uint32_t w1 = row[i + 1u];
-                if (w1 != 0u) {
-                    local_best = max(local_best, measure_nonzero_word<MODE>(i + 1u, w1));
+            for (uint32_t i_inv = threadIdx.x * 4u; i_inv < chunk_end - chunk_start; i_inv += THREADS * 4u) {
+                uint32_t i = chunk_end - 1u - i_inv;
+                if (i <= chunk_start + 3) {
+                    i = chunk_start;
+                } else {
+                    i = i - 3;
                 }
-            }
-            if (i + 2u < chunk_end) {
-                const uint32_t w2 = row[i + 2u];
-                if (w2 != 0u) {
-                    local_best = max(local_best, measure_nonzero_word<MODE>(i + 2u, w2));
+
+                const uint32_t w0 = row[i];
+                if (w0 != 0u) {
+                    local_best = max(local_best, measure_nonzero_word<MODE>(i, w0));
                 }
-            }
-            if (i + 3u < chunk_end) {
-                const uint32_t w3 = row[i + 3u];
-                if (w3 != 0u) {
-                    local_best = max(local_best, measure_nonzero_word<MODE>(i + 3u, w3));
+                if (i + 1u < chunk_end) {
+                    const uint32_t w1 = row[i + 1u];
+                    if (w1 != 0u) {
+                        local_best = max(local_best, measure_nonzero_word<MODE>(i + 1u, w1));
+                    }
+                }
+                if (i + 2u < chunk_end) {
+                    const uint32_t w2 = row[i + 2u];
+                    if (w2 != 0u) {
+                        local_best = max(local_best, measure_nonzero_word<MODE>(i + 2u, w2));
+                    }
+                }
+                if (i + 3u < chunk_end) {
+                    const uint32_t w3 = row[i + 3u];
+                    if (w3 != 0u) {
+                        local_best = max(local_best, measure_nonzero_word<MODE>(i + 3u, w3));
+                    }
+                }
+                if (local_best != 0u) {
+                    break;
                 }
             }
             if (local_best != 0u) {
                 break;
             }
         }
-        if (local_best != 0u) {
-            break;
+
+        shared_best[threadIdx.x] = local_best;
+        __syncthreads();
+
+        for (int stride = THREADS / 2; stride > 0; stride /= 2) {
+            if (threadIdx.x < (uint32_t)stride) {
+                shared_best[threadIdx.x] = max(shared_best[threadIdx.x], shared_best[threadIdx.x + stride]);
+            }
+            __syncthreads();
         }
-    }
 
-    shared_best[threadIdx.x] = local_best;
-    __syncthreads();
-
-    for (int stride = THREADS / 2; stride > 0; stride /= 2) {
-        if (threadIdx.x < (uint32_t)stride) {
-            shared_best[threadIdx.x] = max(shared_best[threadIdx.x], shared_best[threadIdx.x + stride]);
+        if (threadIdx.x == 0 && shared_best[0] != 0u) {
+            atomicMax(result, shared_best[0]);
         }
         __syncthreads();
-    }
-
-    if (threadIdx.x == 0 && shared_best[0] != 0u) {
-        atomicMax(result, shared_best[0]);
     }
 }
 

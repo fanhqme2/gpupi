@@ -195,6 +195,7 @@ __global__ void batch_mul_naive_par_kernel(uint32_t * A, uint32_t * B, uint32_t 
                         r[i0 + j + 1] = r1_value;
                     }
                 }
+                __syncwarp();
                 r0_value = cuda::device::warp_shuffle_down<BLOCK_SIZE, uint32_t>(r0_value, 1);
                 r1_value = cuda::device::warp_shuffle_down<BLOCK_SIZE, uint32_t>(r1_value, 1);
                 if (threadIdx.x == BLOCK_SIZE - 1){
@@ -228,6 +229,7 @@ __global__ void batch_mul_naive_par_kernel(uint32_t * A, uint32_t * B, uint32_t 
             if (i + 1 + L_b_2 < L){
                 r[i + 1 + L_b_2] = r1_value;
             }
+            __syncwarp();
         }
         __syncthreads();
 

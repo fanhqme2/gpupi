@@ -205,6 +205,7 @@ __global__ void batch_shift_sub_single_block_kernel(
     uint32_t stride_C
 ) {
     __shared__ ushort2 borrow_info[32];
+    __shared__ ushort block_borrow_shared;
 
     const uint32_t linear_tid = threadIdx.y * blockDim.x + threadIdx.x;
     const uint32_t threads_per_block = blockDim.x * blockDim.y;
@@ -213,7 +214,10 @@ __global__ void batch_shift_sub_single_block_kernel(
         const uint32_t * a_row = A + (size_t)idx * stride_A;
         const uint32_t * b_row = B + (size_t)idx * stride_B;
         uint32_t * c_row = C + (size_t)idx * stride_C;
-        ushort block_borrow = 0;
+        if (linear_tid == 0) {
+            block_borrow_shared = 0;
+        }
+        __syncthreads();
 
         for (uint32_t i0 = 0; i0 < L_c; i0 += threads_per_block * 2u) {
             const uint32_t i = i0 + linear_tid * 2u;
@@ -254,7 +258,7 @@ __global__ void batch_shift_sub_single_block_kernel(
                     }
                 }
                 if (threadIdx.x < blockDim.y) {
-                    ushort compound = warp_borrow.y + block_borrow;
+                    ushort compound = warp_borrow.y + block_borrow_shared;
                     warp_borrow.x += compound >> 2;
                     warp_borrow.y = 0;
                     borrow_info[threadIdx.x] = warp_borrow;
@@ -263,11 +267,11 @@ __global__ void batch_shift_sub_single_block_kernel(
             __syncthreads();
 
             if (threadIdx.y < blockDim.y) {
-                ushort compound = borrow.y + ((threadIdx.y > 0) ? borrow_info[threadIdx.y - 1].x : block_borrow);
+                ushort compound = borrow.y + ((threadIdx.y > 0) ? borrow_info[threadIdx.y - 1].x : block_borrow_shared);
                 borrow.x += compound >> 2;
                 borrow = cuda::device::warp_shuffle_up<32, ushort2>(borrow, 1);
                 if (threadIdx.x == 0) {
-                    borrow.x = (threadIdx.y == 0) ? block_borrow : borrow_info[threadIdx.y - 1].x;
+                    borrow.x = (threadIdx.y == 0) ? block_borrow_shared : borrow_info[threadIdx.y - 1].x;
                 }
                 r0_value = sub_cc(r0_value, (uint32_t)borrow.x);
                 r1_value = subc_cc(r1_value, 0);
@@ -281,7 +285,7 @@ __global__ void batch_shift_sub_single_block_kernel(
             }
 
             if (linear_tid == 0) {
-                block_borrow = borrow_info[blockDim.y - 1].x;
+                block_borrow_shared = borrow_info[blockDim.y - 1].x;
             }
             __syncthreads();
         }
@@ -304,100 +308,99 @@ __global__ void batch_shift_sub_reduce_blocks_kernel(
     uint32_t stride_C
 ) {
     __shared__ ushort2 borrow_info[32];
-    const uint32_t number_idx = blockIdx.y;
-    if (number_idx >= N) return;
-
     const uint32_t linear_tid = threadIdx.y * blockDim.x + threadIdx.x;
     const uint32_t threads_per_block = blockDim.x * blockDim.y;
     const uint32_t blocks_per_num = (L_c + kChunkSize - 1u) / kChunkSize;
 
-    const uint32_t * a_row = A + (size_t)number_idx * stride_A;
-    const uint32_t * b_row = B + (size_t)number_idx * stride_B;
-    uint32_t * c_base = C + (size_t)number_idx * stride_C;
-    ushort2 * borrow_base = block_borrow_summary + (size_t)number_idx * blocks_per_num;
+    for (uint32_t number_idx = blockIdx.y; number_idx < N; number_idx += gridDim.y) {
+        const uint32_t * a_row = A + (size_t)number_idx * stride_A;
+        const uint32_t * b_row = B + (size_t)number_idx * stride_B;
+        uint32_t * c_base = C + (size_t)number_idx * stride_C;
+        ushort2 * borrow_base = block_borrow_summary + (size_t)number_idx * blocks_per_num;
 
-    for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
-         chunk_start < L_c;
-         chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
-        const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
-        uint32_t * c_row = c_base + chunk_start;
-        ushort2 block_summary = make_ushort2(0, 0);
+        for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
+             chunk_start < L_c;
+             chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
+            const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
+            uint32_t * c_row = c_base + chunk_start;
+            ushort2 block_summary = make_ushort2(0, 0);
 
-        for (uint32_t i0 = 0; i0 < chunk_len; i0 += threads_per_block * 2u) {
-            const uint32_t i = i0 + linear_tid * 2u;
-            const uint32_t g0 = chunk_start + i;
-            const uint32_t g1 = g0 + 1u;
-            uint32_t r0_value = (i < chunk_len) ? load_shifted_word(a_row, g0, L_a, shift_words, shift_bits) : 0u;
-            uint32_t r1_value = (i + 1u < chunk_len) ? load_shifted_word(a_row, g1, L_a, shift_words, shift_bits) : 0u;
-            const uint32_t c0_value = (g0 < L_b && i < chunk_len) ? b_row[g0] : 0u;
-            const uint32_t c1_value = (g1 < L_b && i + 1u < chunk_len) ? b_row[g1] : 0u;
-            ushort2 borrow;
+            for (uint32_t i0 = 0; i0 < chunk_len; i0 += threads_per_block * 2u) {
+                const uint32_t i = i0 + linear_tid * 2u;
+                const uint32_t g0 = chunk_start + i;
+                const uint32_t g1 = g0 + 1u;
+                uint32_t r0_value = (i < chunk_len) ? load_shifted_word(a_row, g0, L_a, shift_words, shift_bits) : 0u;
+                uint32_t r1_value = (i + 1u < chunk_len) ? load_shifted_word(a_row, g1, L_a, shift_words, shift_bits) : 0u;
+                const uint32_t c0_value = (g0 < L_b && i < chunk_len) ? b_row[g0] : 0u;
+                const uint32_t c1_value = (g1 < L_b && i + 1u < chunk_len) ? b_row[g1] : 0u;
+                ushort2 borrow;
 
-            r0_value = sub_cc(r0_value, c0_value);
-            r1_value = subc_cc(r1_value, c1_value);
-            borrow.x = -subc(0, 0);
-            sub_cc(r0_value, 2);
-            subc_cc(r1_value, 0);
-            if (subc(0, 0)) {
-                borrow.y = 3u - (r0_value & 3u);
-            } else {
-                borrow.y = 0;
-            }
-
-            for (int delta = 1; delta < 32; delta *= 2) {
-                const ushort2 borrow_prev = cuda::device::warp_shuffle_up<32, ushort2>(borrow, delta);
-                if (threadIdx.x >= delta) {
-                    borrow = combine_borrow_summary(borrow, borrow_prev);
+                r0_value = sub_cc(r0_value, c0_value);
+                r1_value = subc_cc(r1_value, c1_value);
+                borrow.x = -subc(0, 0);
+                sub_cc(r0_value, 2);
+                subc_cc(r1_value, 0);
+                if (subc(0, 0)) {
+                    borrow.y = 3u - (r0_value & 3u);
+                } else {
+                    borrow.y = 0;
                 }
-            }
-            if (threadIdx.x == 31) {
-                borrow_info[threadIdx.y] = borrow;
-            }
-            __syncthreads();
 
-            if (threadIdx.y == 0) {
-                ushort2 warp_borrow = (threadIdx.x < blockDim.y) ? borrow_info[threadIdx.x] : make_ushort2(0, 0);
                 for (int delta = 1; delta < 32; delta *= 2) {
-                    const ushort2 borrow_prev = cuda::device::warp_shuffle_up<32, ushort2>(warp_borrow, delta);
-                    if (threadIdx.x < blockDim.y && threadIdx.x >= delta) {
-                        warp_borrow = combine_borrow_summary(warp_borrow, borrow_prev);
+                    const ushort2 borrow_prev = cuda::device::warp_shuffle_up<32, ushort2>(borrow, delta);
+                    if (threadIdx.x >= delta) {
+                        borrow = combine_borrow_summary(borrow, borrow_prev);
                     }
                 }
-                if (threadIdx.x < blockDim.y) {
-                    borrow_info[threadIdx.x] = warp_borrow;
+                if (threadIdx.x == 31) {
+                    borrow_info[threadIdx.y] = borrow;
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            if (threadIdx.y < blockDim.y) {
-                ushort compound = borrow.y + ((threadIdx.y > 0) ? borrow_info[threadIdx.y - 1].x : 0);
-                borrow.x += compound >> 2;
-            }
-            borrow = cuda::device::warp_shuffle_up<32, ushort2>(borrow, 1);
-            if (threadIdx.x == 0) {
-                borrow.x = (threadIdx.y == 0) ? 0 : borrow_info[threadIdx.y - 1].x;
-            }
-            r0_value = sub_cc(r0_value, (uint32_t)borrow.x);
-            r1_value = subc_cc(r1_value, 0);
+                if (threadIdx.y == 0) {
+                    ushort2 warp_borrow = (threadIdx.x < blockDim.y) ? borrow_info[threadIdx.x] : make_ushort2(0, 0);
+                    for (int delta = 1; delta < 32; delta *= 2) {
+                        const ushort2 borrow_prev = cuda::device::warp_shuffle_up<32, ushort2>(warp_borrow, delta);
+                        if (threadIdx.x < blockDim.y && threadIdx.x >= delta) {
+                            warp_borrow = combine_borrow_summary(warp_borrow, borrow_prev);
+                        }
+                    }
+                    if (threadIdx.x < blockDim.y) {
+                        borrow_info[threadIdx.x] = warp_borrow;
+                    }
+                }
+                __syncthreads();
 
-            if (i < chunk_len) {
-                c_row[i] = r0_value;
-            }
-            if (i + 1u < chunk_len) {
-                c_row[i + 1u] = r1_value;
+                if (threadIdx.y < blockDim.y) {
+                    ushort compound = borrow.y + ((threadIdx.y > 0) ? borrow_info[threadIdx.y - 1].x : 0);
+                    borrow.x += compound >> 2;
+                }
+                borrow = cuda::device::warp_shuffle_up<32, ushort2>(borrow, 1);
+                if (threadIdx.x == 0) {
+                    borrow.x = (threadIdx.y == 0) ? 0 : borrow_info[threadIdx.y - 1].x;
+                }
+                r0_value = sub_cc(r0_value, (uint32_t)borrow.x);
+                r1_value = subc_cc(r1_value, 0);
+
+                if (i < chunk_len) {
+                    c_row[i] = r0_value;
+                }
+                if (i + 1u < chunk_len) {
+                    c_row[i + 1u] = r1_value;
+                }
+
+                __syncthreads();
+                if (linear_tid == 0) {
+                    block_summary = borrow_info[blockDim.y - 1];
+                }
+                __syncthreads();
             }
 
-            __syncthreads();
             if (linear_tid == 0) {
-                block_summary = borrow_info[blockDim.y - 1];
+                borrow_base[chunk_idx] = block_summary;
             }
             __syncthreads();
         }
-
-        if (linear_tid == 0) {
-            borrow_base[chunk_idx] = block_summary;
-        }
-        __syncthreads();
     }
 }
 
@@ -465,43 +468,44 @@ __global__ void batch_shift_sub_apply_blocks_kernel(
     uint32_t stride_C
 ) {
     __shared__ uint32_t borrow_info[32];
-    const uint32_t number_idx = blockIdx.y;
-    if (number_idx >= N) return;
-
     const uint32_t blocks_per_num = (L_c + kChunkSize - 1u) / kChunkSize;
-    const ushort2 * borrow_base = block_borrow_summary + (size_t)number_idx * blocks_per_num;
-    uint32_t * c_base = C + (size_t)number_idx * stride_C;
 
-    for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
-         chunk_start < L_c;
-         chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
-        const uint32_t borrow_in = borrow_base[chunk_idx].x;
-        if (borrow_in == 0) {
-            continue;
-        }
+    for (uint32_t number_idx = blockIdx.y; number_idx < N; number_idx += gridDim.y) {
+        const ushort2 * borrow_base = block_borrow_summary + (size_t)number_idx * blocks_per_num;
+        uint32_t * c_base = C + (size_t)number_idx * stride_C;
 
-        const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
-        uint32_t * c_row = c_base + chunk_start;
-
-        for (uint32_t i0 = 0; i0 < chunk_len; i0 += blockDim.x * blockDim.y * 2u) {
-            const uint32_t i = i0 + (threadIdx.y * 32u + threadIdx.x) * 2u;
-            uint32_t r0_value = (i < chunk_len) ? c_row[i] : 0u;
-            uint32_t r1_value = (i + 1u < chunk_len) ? c_row[i + 1u] : 0u;
-            uint32_t c0_value = (i == 0 && i0 == 0) ? borrow_in : 0u;
-            uint32_t c1_value = 0u;
-            const uint32_t original = r0_value;
-
-            batch_shift_sub_64_all_warp(r0_value, r1_value, c0_value, c1_value, borrow_info);
-
-            if (r0_value != original || c0_value != 0u) {
-                if (i < chunk_len) {
-                    c_row[i] = r0_value;
-                }
-                if (i + 1u < chunk_len) {
-                    c_row[i + 1u] = r1_value;
-                }
+        for (uint32_t chunk_start = blockIdx.x * kChunkSize, chunk_idx = blockIdx.x;
+             chunk_start < L_c;
+             chunk_start += gridDim.x * kChunkSize, chunk_idx += gridDim.x) {
+            const uint32_t borrow_in = borrow_base[chunk_idx].x;
+            if (borrow_in == 0) {
+                continue;
             }
-            __syncthreads();
+
+            const uint32_t chunk_len = min(kChunkSize, L_c - chunk_start);
+            uint32_t * c_row = c_base + chunk_start;
+
+            for (uint32_t i0 = 0; i0 < chunk_len; i0 += blockDim.x * blockDim.y * 2u) {
+                const uint32_t i = i0 + (threadIdx.y * 32u + threadIdx.x) * 2u;
+                uint32_t r0_value = (i < chunk_len) ? c_row[i] : 0u;
+                uint32_t r1_value = (i + 1u < chunk_len) ? c_row[i + 1u] : 0u;
+                uint32_t c0_value = (i == 0 && i0 == 0) ? borrow_in : 0u;
+                uint32_t c1_value = 0u;
+                const uint32_t original0 = r0_value;
+                const uint32_t original1 = r1_value;
+
+                batch_shift_sub_64_all_warp(r0_value, r1_value, c0_value, c1_value, borrow_info);
+
+                if (r0_value != original0 || r1_value != original1 || c0_value != 0u || c1_value != 0u) {
+                    if (i < chunk_len) {
+                        c_row[i] = r0_value;
+                    }
+                    if (i + 1u < chunk_len) {
+                        c_row[i + 1u] = r1_value;
+                    }
+                }
+                __syncthreads();
+            }
         }
     }
 }

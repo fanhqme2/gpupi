@@ -133,6 +133,16 @@ __global__ void fill_in_power_table(uint3 * table, int n, uint3 root){
     }
 }
 
+__global__ void fill_in_power_table_linear(uint3 * table, int n, uint3 root){
+    if (threadIdx.x == 0){
+        uint3 value = make_uint3(1, 0, 0);
+        for (int i = 0; i < n; ++i){
+            table[i] = value;
+            value = mul_mod(value, root);
+        }
+    }
+}
+
 __global__ void fill_in_power_table_bitrev16(uint3 * table, int n, uint3 root){
     if (threadIdx.x == 0){
         table[0] = make_uint3(1, 0, 0);
@@ -150,7 +160,7 @@ __global__ void fill_in_power_table_bitrev16(uint3 * table, int n, uint3 root){
 void init_ntt_precomputed_tables(NTTPrecomputedTables * tables){
     fill_in_power_table_bitrev16<<<1, 1024>>>(tables->roots_table_lv1, 65536, make_uint3(arr_root0, arr_root1, arr_root2));
     fill_in_power_table_bitrev16<<<1, 1024>>>(tables->roots_table_lv2, 65536, make_uint3(arr_root65536_0, arr_root65536_1, arr_root65536_2));
-    fill_in_power_table<<<1, 32>>>(tables->inv2n_table, 33, make_uint3(arr_inv2_0, arr_inv2_1, arr_inv2_2));
+    fill_in_power_table_linear<<<1, 1>>>(tables->inv2n_table, 33, make_uint3(arr_inv2_0, arr_inv2_1, arr_inv2_2));
 }
 
 __global__ void fft_level_forward(uint3 * parts, int k, int i, uint3 * roots_table_lv1, uint3 * roots_table_lv2, size_t N){
@@ -1257,10 +1267,11 @@ __global__ void add2_apply_blocks(uint32_t * ret, ushort2 * ret_carry, size_t N,
                 uint32_t r1_value = (i + 1 < L) ? ret[i + 1] : 0;
                 uint32_t c0_value = (i == i0) ? block_carry : 0;
                 uint32_t c1_value = 0;
-                uint32_t r0_value_old = r0_value;
+                const uint32_t r0_value_old = r0_value;
+                const uint32_t r1_value_old = r1_value;
                 batch_mul_add_64_all_warp<32>(r0_value, r1_value, c0_value, c1_value, carryInfo);
 
-                if (r0_value != r0_value_old){
+                if (r0_value != r0_value_old || r1_value != r1_value_old || c0_value != 0u || c1_value != 0u){
                     if (i < L){
                         ret[i] = r0_value;
                     }
@@ -1550,8 +1561,9 @@ __global__ void mul_fft_local(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 
             __syncthreads();
 
             if (threadIdx.x < 32){
-                ushort2 bc = carry_prop[threadIdx.x];
-                for (int delta = 1; delta < blockDim.x >> 5; delta *= 2){
+                const uint32_t warp_count = blockDim.x >> 5;
+                ushort2 bc = (threadIdx.x < warp_count) ? carry_prop[threadIdx.x] : make_ushort2(0, 0);
+                for (int delta = 1; delta < warp_count; delta *= 2){
                     ushort2 carry_prev = cuda::device::warp_shuffle_up<32, ushort2>(bc, delta);
                     if (threadIdx.x >= delta){
                         ushort compound = bc.y + carry_prev.x;
@@ -1566,7 +1578,9 @@ __global__ void mul_fft_local(uint32_t * A, uint32_t * B, uint32_t * ret, uint3 
                 ushort compound = bc.y + block_carry;
                 bc.x += compound >> 2;
                 bc.y = 0;
-                carry_prop[threadIdx.x] = bc;
+                if (threadIdx.x < warp_count){
+                    carry_prop[threadIdx.x] = bc;
+                }
             }
             __syncthreads();
 
@@ -1681,6 +1695,7 @@ __global__ void mul_fft_local_spill(uint32_t * A, uint32_t * B, uint32_t * ret, 
             c1_value = local_coefs_a[t].y;
             t0_value = (t <= 1) ? 0 : local_coefs_a[t - 2].z;
             t1_value = (t == 0) ? 0 : local_coefs_a[t - 1].z;
+            __syncthreads();
             ushort2 carry;
 
             r0_value = add_cc(r0_value, c0_value);
