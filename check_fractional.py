@@ -103,13 +103,53 @@ def truncate_limbs_quotient(p, q, prec_limbs):
         q >>= extra_limbs * 32
     return p, q
 
+def recursive_inverse(x, L, is_initial = False):
+    if L <= 256:
+        total = mpz(1) << L
+        y = total // x
+        res = total - y * x
+        return y, res
 
-def fractional_reference(target_digits):
+    m = (L - 2) // 4
+    m -= m & 31
+    x1 = x >> m
+    x2 = x & ((mpz(1) << m) - 1)
+
+    y1, res1 = recursive_inverse(x1, L - m * 2)
+    x2y1 = x2 * y1
+    res1_m = res1 << m
+    if res1_m >= x2y1:
+        res2 = res1_m - x2y1
+        y2 = (res2 * y1) >> (L - m * 2)
+        res2 = (res2 << m) - y2 * x
+        y1y2 = (y1 << m) + y2
+    else:
+        res2 = x2y1 - res1_m
+        y2 = ((res2 * y1) >> (L - m * 2)) + 1
+        res2 = y2 * x - (res2 << m)
+        y1y2 = (y1 << m) - y2
+
+    if is_initial:
+        return y1y2
+    
+    assert res2 >= 0 and res2 < x
+    # while res2 < 0:
+    #     res2 += x
+    #     y2 -= 1
+    # while res2 >= x:
+    #     res2 -= x
+    #     y2 += 1
+    return y1y2, res2
+
+
+
+def main():
+    target_digits = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
+    prec_limbs = (int(target_digits * 3.322) + 31) // 32 + 1
     n = 1
     while n * 17 * 14.3 < target_digits:
         n *= 2
 
-    prec_limbs = (int(target_digits * 3.322) + 31) // 32 + 1
     q, r = binary_split(0, n * 17, True)
     r >>= 15 * (n * 17) - 8
 
@@ -118,94 +158,36 @@ def fractional_reference(target_digits):
 
     p_final = p_15 * q
     q_final = r * q_15
-    return truncate_limbs_quotient(p_final, q_final, prec_limbs)
 
+    p_final, q_final = truncate_limbs_quotient(p_final, q_final, prec_limbs)
+    
+    q_bits_count = q_final.bit_length()
+    inv_q_final = recursive_inverse(q_final, q_bits_count * 2 - 1, is_initial = True)
 
-def parse_cuda_output(text):
-    matches = dict(re.findall(r"([PQ])\s*=\s*([0-9a-fA-F]+)", text))
-    missing = [name for name in ("P", "Q") if name not in matches]
-    if missing:
-        raise ValueError("missing values in CUDA output: %s" % ", ".join(missing))
-    return {name: mpz(matches[name], 16) for name in ("P", "Q")}
+    ret_final = (p_final * inv_q_final) >> (q_bits_count * 2 - 1 - prec_limbs * 32)
 
-
-def int_to_hex(value):
-    if value == 0:
-        return "0"
-    return format(int(value), "x")
-
-
-def int_to_limbs(value):
-    hex_value = int_to_hex(value)
-    if hex_value == "0":
-        return []
-    padded = hex_value.zfill(((len(hex_value) + 7) // 8) * 8)
-    return [int(padded[i - 8:i], 16) for i in range(len(padded), 0, -8)]
-
-
-def print_limb_mismatch(name, expected, actual, window=2):
-    expected_limbs = int_to_limbs(expected)
-    actual_limbs = int_to_limbs(actual)
-    if len(expected_limbs) != len(actual_limbs):
-        print(
-            "%s length mismatch: expected %d limbs, actual %d limbs"
-            % (name, len(expected_limbs), len(actual_limbs))
-        )
-
-    limit = min(len(expected_limbs), len(actual_limbs))
-    mismatch = None
-    for i in range(limit):
-        if expected_limbs[i] != actual_limbs[i]:
-            mismatch = i
-            break
-    if mismatch is None:
-        if len(expected_limbs) != len(actual_limbs):
-            mismatch = limit
-        else:
-            print("%s matches" % name)
-            return
-
-    print("%s mismatch at limb %d" % (name, mismatch))
-    start = max(0, mismatch - window)
-    end = min(max(len(expected_limbs), len(actual_limbs)), mismatch + window + 1)
-    for i in range(start, end):
-        exp = expected_limbs[i] if i < len(expected_limbs) else None
-        act = actual_limbs[i] if i < len(actual_limbs) else None
-        exp_text = "--------" if exp is None else "%08x" % exp
-        act_text = "--------" if act is None else "%08x" % act
-        marker = "<--" if i == mismatch else "   "
-        print("%s limb %d: expected %s actual %s" % (marker, i, exp_text, act_text))
-
-
-def compare_value(name, expected, actual):
-    if expected == actual:
-        print("%s matches" % name)
-        return True
-    print_limb_mismatch(name, expected, actual)
-    return False
-
-
-def main():
-    target_digits = int(sys.argv[1])
-    binary = sys.argv[2] if len(sys.argv) >= 3 else "./pi_bs_gpu"
-
-    result = subprocess.run(
-        [binary, str(target_digits)],
+    proc = subprocess.run(
+        ["./pi_bs_gpu", str(target_digits)],
         check=True,
         capture_output=True,
         text=True,
     )
-    actual = parse_cuda_output(result.stdout)
+    match = re.search(r"^RET = ([0-9a-fA-F]+)$", proc.stdout, re.MULTILINE)
+    if match is None:
+        sys.stderr.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        raise RuntimeError("failed to parse RET from pi_bs_gpu output")
+    gpu_ret = mpz(match.group(1), 16)
+    assert gpu_ret == ret_final
+    print(f"matched digits={target_digits}")
 
-    p, q = fractional_reference(target_digits)
-    expected = {"P": p, "Q": q}
-
-    ok = compare_value("P", expected["P"], actual["P"]) and compare_value("Q", expected["Q"], actual["Q"])
-    if ok:
-        print("All values match for target_digits=%d" % target_digits)
-    else:
-        sys.exit(1)
-
+    # #verifying the results with the known value of pi
+    # ret = (ret_final * mpz(10) ** target_digits) >> (prec_limbs * 32)
+    # ret = str(ret)
+    # ret_gt = open('../pi_1000000000.txt', 'r').read(target_digits + 2).replace('.', '')
+    # print(ret[:20] + '...' + ret[-20:])
+    # assert ret == ret_gt
+    
 
 if __name__ == "__main__":
     main()

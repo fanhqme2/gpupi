@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <vector>
+
+#include <gmp.h>
 
 #include "batch_arith.h"
 #include "batch_mul_naive.h"
@@ -806,18 +809,14 @@ bool print_validation_summary(const BatchMPArray &Q, const BatchMPArray &R) {
     return true;
 }
 
-bool print_fractional_preview_summary(const BatchMPArray &P, const BatchMPArray &Q) {
-    uint32_t * p_host = nullptr;
-    uint32_t * q_host = nullptr;
-    if (!copy_device_array_to_host(P, &p_host) || !copy_device_array_to_host(Q, &q_host)) {
-        delete [] p_host;
-        delete [] q_host;
+bool print_fractional_preview_summary(const BatchMPArray &ret) {
+    uint32_t * ret_host = nullptr;
+    if (!copy_device_array_to_host(ret, &ret_host)) {
+        delete [] ret_host;
         return false;
     }
-    print_hex_preview_with_hash("P", p_host, P.length);
-    print_hex_preview_with_hash("Q", q_host, Q.length);
-    delete [] p_host;
-    delete [] q_host;
+    print_hex_preview_with_hash("RET", ret_host, ret.length);
+    delete [] ret_host;
     return true;
 }
 
@@ -833,6 +832,38 @@ uint32_t compute_bit_length(const uint32_t * limbs, uint32_t length) {
         return 0;
     }
     return (length - 1) * 32u + limb_bit_length(limbs[length - 1]);
+}
+
+cudaError_t copy_top_limb_to_host(const BatchMPArray & array, uint32_t * top_limb) {
+    if (top_limb == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    if (array.length == 0) {
+        *top_limb = 0u;
+        return cudaSuccess;
+    }
+    return cudaMemcpy(top_limb, array.data + array.length - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+}
+
+cudaError_t compact_and_compute_bit_length(BatchMPContext * context, BatchMPArray & array, uint32_t * bit_length) {
+    if (bit_length == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    cudaError_t err = array.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    if (array.length == 0) {
+        *bit_length = 0u;
+        return cudaSuccess;
+    }
+    uint32_t top_limb = 0u;
+    err = copy_top_limb_to_host(array, &top_limb);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    *bit_length = (array.length - 1) * 32u + limb_bit_length(top_limb);
+    return cudaSuccess;
 }
 
 uint32_t mod_mul_u32(uint32_t a, uint32_t b) {
@@ -909,6 +940,328 @@ bool print_full_hex_value(const char * label, const BatchMPArray & array) {
     printf("\n");
     delete [] host;
     return true;
+}
+
+BatchMPArray make_array_view(uint32_t * data, uint32_t length, uint32_t stride = 0u) {
+    return {
+        .data = data,
+        .length = length,
+        .batch_size = 1u,
+        .stride = (stride == 0u) ? length : stride
+    };
+}
+
+BatchMPArray make_subview(const BatchMPArray & array, uint32_t start_limb, uint32_t length) {
+    if (start_limb > array.length) {
+        start_limb = array.length;
+    }
+    const uint32_t max_length = array.length - start_limb;
+    if (length > max_length) {
+        length = max_length;
+    }
+    const uint32_t stride = (array.stride >= start_limb) ? (array.stride - start_limb) : 0u;
+    return {
+        .data = array.data + start_limb,
+        .length = length,
+        .batch_size = array.batch_size,
+        .stride = stride
+    };
+}
+
+cudaError_t load_mpz_from_device(const BatchMPArray & array, mpz_t value) {
+    std::vector<uint32_t> host(array.length == 0 ? 1u : array.length, 0u);
+    if (array.length > 0) {
+        cudaError_t err = cudaMemcpy(host.data(), array.data, array.length * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            return err;
+        }
+    }
+    mpz_import(value, array.length, -1, sizeof(uint32_t), 0, 0, host.data());
+    return cudaSuccess;
+}
+
+cudaError_t store_mpz_to_device(const mpz_t value, BatchMPArray & array) {
+    std::vector<uint32_t> host(array.stride == 0 ? 1u : array.stride, 0u);
+    size_t written = 0u;
+    mpz_export(host.data(), &written, -1, sizeof(uint32_t), 0, 0, value);
+    uint32_t used = (uint32_t)written;
+    if (used == 0u) {
+        used = 1u;
+    }
+    if (used > array.stride) {
+        return cudaErrorInvalidValue;
+    }
+    cudaError_t err = cudaMemcpy(array.data, host.data(), array.stride * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    array.length = used;
+    return cudaSuccess;
+}
+
+struct RecursiveInverseArena {
+    BatchMPArray storage;
+    uint32_t next_limb;
+};
+
+BatchMPArray arena_alloc(RecursiveInverseArena * arena, uint32_t length) {
+    if (arena == nullptr || arena->storage.data == nullptr) {
+        return {};
+    }
+    const uint64_t end = (uint64_t)arena->next_limb + length;
+    if (end > arena->storage.length) {
+        return {};
+    }
+    BatchMPArray out = make_array_view(arena->storage.data + arena->next_limb, length);
+    arena->next_limb += length;
+    return out;
+}
+
+size_t recursive_inverse_workspace_limbs(uint32_t x_length, uint32_t L, bool is_initial) {
+    if (L <= 256u) {
+        return 0u;
+    }
+    const uint32_t m = ((L - 2u) / 4u) & ~31u;
+    const uint32_t m_limbs = m / 32u;
+    const uint32_t L1 = L - m * 2u;
+    const uint32_t x1_length = (x_length > m_limbs) ? (x_length - m_limbs) : 1u;
+    const uint32_t x2_length = std::min(x_length, m_limbs);
+    const uint32_t y1_length = x1_length + 1u;
+    const uint32_t res1_length = x1_length + 1u;
+    const uint32_t x2_y1_length = x2_length + y1_length;
+    const uint32_t shifted_res1_length = res1_length + m_limbs + 1u;
+    const uint32_t res2_length = std::max(shifted_res1_length, x2_y1_length) + 1u;
+    const uint32_t y2_prod_length = res2_length + y1_length;
+    const uint32_t y2_length = y2_prod_length;
+    const uint32_t shifted_y1_length = y1_length + m_limbs + 1u;
+    const uint32_t shifted_res2_length = res2_length + m_limbs + 1u;
+    const uint32_t y2_x_length = y2_length + x_length;
+
+    size_t total = y1_length + res1_length;
+    total += recursive_inverse_workspace_limbs(x1_length, L1, false);
+    total += x2_y1_length + shifted_res1_length + res2_length + y2_prod_length + y2_length + shifted_y1_length;
+    total += y2_x_length + shifted_res2_length;
+    return total;
+}
+
+cudaError_t subtract_with_sign(
+    BatchMPContext * context,
+    BatchMPArray A,
+    BatchMPArray B,
+    BatchMPArray & diff,
+    bool * a_ge_b
+) {
+    if (a_ge_b == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    cudaError_t err = batch_mp_sub(context, A, B, diff);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    uint32_t sign_limb = 0u;
+    err = copy_top_limb_to_host(diff, &sign_limb);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    if (sign_limb != 0xffffffffu) {
+        *a_ge_b = true;
+        return diff.compact(context);
+    }
+    err = batch_mp_sub(context, B, A, diff);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    *a_ge_b = false;
+    return diff.compact(context);
+}
+
+cudaError_t recursive_inverse(
+    BatchMPContext * context,
+    BatchMPArray x,
+    uint32_t L,
+    bool is_initial,
+    BatchMPArray & y_out,
+    BatchMPArray * res_out,
+    RecursiveInverseArena * arena
+) {
+    if (L <= 256u) {
+        mpz_t x_mpz;
+        mpz_t total_mpz;
+        mpz_t y_mpz;
+        mpz_t res_mpz;
+        mpz_inits(x_mpz, total_mpz, y_mpz, res_mpz, NULL);
+        cudaError_t err = load_mpz_from_device(x, x_mpz);
+        if (err == cudaSuccess) {
+            mpz_set_ui(total_mpz, 1u);
+            mpz_mul_2exp(total_mpz, total_mpz, (mp_bitcnt_t)L);
+            mpz_fdiv_q(y_mpz, total_mpz, x_mpz);
+            mpz_mul(res_mpz, y_mpz, x_mpz);
+            mpz_sub(res_mpz, total_mpz, res_mpz);
+            err = store_mpz_to_device(y_mpz, y_out);
+            if (err == cudaSuccess && !is_initial && res_out != nullptr) {
+                err = store_mpz_to_device(res_mpz, *res_out);
+            }
+        }
+        mpz_clears(x_mpz, total_mpz, y_mpz, res_mpz, NULL);
+        return err;
+    }
+
+    const uint32_t m = ((L - 2u) / 4u) & ~31u;
+    const uint32_t m_limbs = m / 32u;
+    const uint32_t L1 = L - m * 2u;
+    BatchMPArray x1 = make_subview(x, m_limbs, x.length > m_limbs ? (x.length - m_limbs) : 0u);
+    BatchMPArray x2 = make_subview(x, 0u, std::min(x.length, m_limbs));
+
+    BatchMPArray y1 = arena_alloc(arena, (x1.length == 0 ? 1u : x1.length) + 1u);
+    if (y1.data == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
+    BatchMPArray res1 = arena_alloc(arena, (x1.length == 0 ? 1u : x1.length) + 1u);
+    if (res1.data == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
+
+    cudaError_t err = recursive_inverse(context, x1, L1, false, y1, &res1, arena);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = y1.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = res1.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    BatchMPArray x2_y1 = arena_alloc(arena, x2.length + y1.length);
+    BatchMPArray shifted_res1 = arena_alloc(arena, res1.length + m_limbs + 1u);
+    BatchMPArray res2 = arena_alloc(arena, std::max(shifted_res1.length, x2_y1.length) + 1u);
+    if (x2_y1.data == nullptr || shifted_res1.data == nullptr || res2.data == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
+
+    err = batch_mp_mul(context, x2, y1, x2_y1);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = x2_y1.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    err = batch_mp_shift_bits(context, res1, shifted_res1, (int32_t)m);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = shifted_res1.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    bool positive_branch = false;
+    err = subtract_with_sign(context, shifted_res1, x2_y1, res2, &positive_branch);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    BatchMPArray y2_prod = arena_alloc(arena, res2.length + y1.length);
+    if (y2_prod.data == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
+    err = batch_mp_mul(context, res2, y1, y2_prod);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = y2_prod.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    BatchMPArray y2 = arena_alloc(arena, std::max<uint32_t>(2u, y2_prod.length));
+    if (y2.data == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
+    err = batch_mp_shift_bits(context, y2_prod, y2, -(int32_t)L1);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = y2.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    if (!positive_branch) {
+        err = batch_mp_add_small(context, y2, 1u, y2);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        err = y2.compact(context);
+        if (err != cudaSuccess) {
+            return err;
+        }
+    }
+
+    BatchMPArray shifted_y1 = arena_alloc(arena, y1.length + m_limbs + 1u);
+    if (shifted_y1.data == nullptr) {
+        return cudaErrorMemoryAllocation;
+    }
+    err = batch_mp_shift_bits(context, y1, shifted_y1, (int32_t)m);
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = shifted_y1.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    if (positive_branch) {
+        err = batch_mp_add(context, shifted_y1, y2, y_out);
+    } else {
+        err = batch_mp_sub(context, shifted_y1, y2, y_out);
+    }
+    if (err != cudaSuccess) {
+        return err;
+    }
+    err = y_out.compact(context);
+    if (err != cudaSuccess) {
+        return err;
+    }
+
+    if (!is_initial && res_out != nullptr) {
+        BatchMPArray y2_x = arena_alloc(arena, y2.length + x.length);
+        BatchMPArray shifted_res2 = arena_alloc(arena, res2.length + m_limbs + 1u);
+        if (y2_x.data == nullptr || shifted_res2.data == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
+        err = batch_mp_mul(context, y2, x, y2_x);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        err = y2_x.compact(context);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        err = batch_mp_shift_bits(context, res2, shifted_res2, (int32_t)m);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        err = shifted_res2.compact(context);
+        if (err != cudaSuccess) {
+            return err;
+        }
+        if (positive_branch) {
+            err = batch_mp_sub(context, shifted_res2, y2_x, *res_out);
+        } else {
+            err = batch_mp_sub(context, y2_x, shifted_res2, *res_out);
+        }
+        if (err != cudaSuccess) {
+            return err;
+        }
+        return res_out->compact(context);
+    }
+
+    return cudaSuccess;
 }
 
 cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q, StageProfiler * profiler = nullptr) {
@@ -1113,14 +1466,24 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     BatchMPArray P_15{}, Q_15{};
     BatchMPArray P_final{};
     BatchMPArray Q_final{};
+    BatchMPArray P_truncated_final{};
+    BatchMPArray Q_truncated_final{};
+    BatchMPArray inverse_workspace{};
+    BatchMPArray inv_q_final{};
+    BatchMPArray ret_product{};
+    BatchMPArray ret_final{};
     auto release_all = [&]() {
         release_array(&Q_bs);
         release_array(&R_bs);
         release_array(&R_shifted);
         release_array(&P_15);
         release_array(&Q_15);
+        release_array(&inverse_workspace);
+        release_array(&inv_q_final);
+        release_array(&ret_product);
         if (P_base.data == nullptr) {
             release_array(&P_final);
+            release_array(&ret_final);
         }
         if (Q_base.data == nullptr) {
             release_array(&Q_final);
@@ -1183,27 +1546,59 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     err = profile_compact(context, Q_final, "Q", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
+    extra_limbs = std::max(0l, std::min((long)P_final.length, (long)Q_final.length) - prec_limbs);
+    P_truncated_final = make_subview(P_final, (uint32_t)extra_limbs, P_final.length - (uint32_t)extra_limbs);
+    Q_truncated_final = make_subview(Q_final, (uint32_t)extra_limbs, Q_final.length - (uint32_t)extra_limbs);
+
+    uint32_t q_bits_count = 0u;
+    err = compact_and_compute_bit_length(context, Q_truncated_final, &q_bits_count);
+    CHECK_AND_RETURN(err, release_all());
+
+    const uint32_t inverse_bits = q_bits_count * 2u - 1u;
+    inverse_workspace = batch_mp_array_create(1u, (uint32_t)recursive_inverse_workspace_limbs(Q_truncated_final.length, inverse_bits, true));
+    inv_q_final = batch_mp_array_create(1u, Q_truncated_final.length + 1u);
+    if ((inverse_workspace.length != 0u && inverse_workspace.data == nullptr) || inv_q_final.data == nullptr) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+    }
+
+    RecursiveInverseArena arena{
+        .storage = inverse_workspace,
+        .next_limb = 0u
+    };
+    err = recursive_inverse(context, Q_truncated_final, inverse_bits, true, inv_q_final, nullptr, &arena);
+    CHECK_AND_RETURN(err, release_all());
+    err = inv_q_final.compact(context);
+    CHECK_AND_RETURN(err, release_all());
+
+    ret_product = batch_mp_array_create(1u, P_truncated_final.length + inv_q_final.length);
+    ret_final = batch_mp_array_create(1u, P_truncated_final.length + inv_q_final.length);
+    if (ret_product.data == nullptr || ret_final.data == nullptr) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+    }
+    err = batch_mp_mul(context, P_truncated_final, inv_q_final, ret_product);
+    CHECK_AND_RETURN(err, release_all());
+    err = ret_product.compact(context);
+    CHECK_AND_RETURN(err, release_all());
+
+    const int32_t final_shift = -((int32_t)inverse_bits - prec_limbs * 32);
+    err = batch_mp_shift_bits(context, ret_product, ret_final, final_shift);
+    CHECK_AND_RETURN(err, release_all());
+    err = ret_final.compact(context);
+    CHECK_AND_RETURN(err, release_all());
+
     release_array(&Q_bs);
     release_array(&R_shifted);
     release_array(&P_15);
     release_array(&Q_15);
+    release_array(&inverse_workspace);
+    release_array(&inv_q_final);
+    release_array(&ret_product);
+    release_array(&P_final);
 
-    P_base = P_final;
+    P_base = ret_final;
     Q_base = Q_final;
-
-    extra_limbs = std::max(0l, std::min((long)P_final.length, (long)Q_final.length) - prec_limbs);
-    P = {
-        .data = P_final.data + extra_limbs,
-        .length = P_final.length - extra_limbs,
-        .batch_size = 1,
-        .stride = P_final.length - extra_limbs
-    };
-    Q = {
-        .data = Q_final.data + extra_limbs,
-        .length = Q_final.length - extra_limbs,
-        .batch_size = 1,
-        .stride = Q_final.length - extra_limbs
-    };
+    P = ret_final;
+    Q = Q_truncated_final;
 
     return cudaSuccess;
 }
@@ -1482,7 +1877,7 @@ int main_sqrt_10005(int argc, char ** argv){
 
     if (benchmark_only) {
         printf(
-            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%d RET_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
             target_digits,
             P.length,
             Q.length,
@@ -1548,7 +1943,7 @@ int main_sqrt_10005(int argc, char ** argv){
             total_ntt_ms
         );
         printf(
-            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%d RET_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
             target_digits,
             P.length,
             Q.length,
@@ -1671,14 +2066,13 @@ int main_fractional(int argc, char ** argv){
 
     if (benchmark_only) {
         printf(
-            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%d RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
             target_digits,
             P.length,
-            Q.length,
             elapsed_ms,
             (int)(batch_mp_workspace_size(context) / (1024 * 1024))
         );
-        if (!print_fractional_preview_summary(P, Q)) {
+        if (!print_fractional_preview_summary(P)) {
             release_array(&P_base);
             release_array(&Q_base);
             batch_mp_destroy(context);
@@ -1749,15 +2143,14 @@ int main_fractional(int argc, char ** argv){
         );
         const float accounted_ms = total_leaf_ms + total_mul_ms + total_mul_small_ms + total_shift_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
         printf(
-            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%d RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
             target_digits,
             P.length,
-            Q.length,
             elapsed_ms,
             accounted_ms,
             (int)(batch_mp_workspace_size(context) / (1024 * 1024))
         );
-        if (!print_fractional_preview_summary(P, Q)) {
+        if (!print_fractional_preview_summary(P)) {
             release_array(&P_base);
             release_array(&Q_base);
             batch_mp_destroy(context);
@@ -1770,13 +2163,12 @@ int main_fractional(int argc, char ** argv){
     }
 
     printf(
-        "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f\n",
+        "target_digits=%d RET_len=%u elapsed_ms=%.3f\n",
         target_digits,
         P.length,
-        Q.length,
         elapsed_ms
     );
-    if (print_result && (!print_full_hex_value("P", P) || !print_full_hex_value("Q", Q))) {
+    if (print_result && !print_full_hex_value("RET", P)) {
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);

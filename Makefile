@@ -5,7 +5,7 @@ BUILD_DIR := build
 NVCCFLAGS ?= -O3
 CPPFLAGS ?=
 LDFLAGS ?=
-LDLIBS ?=
+LDLIBS ?= -lgmp
 
 MAIN_SRC := pi_bs_gpu.cu
 LIB_SRCS := \
