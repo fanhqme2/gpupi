@@ -942,6 +942,27 @@ bool print_full_hex_value(const char * label, const BatchMPArray & array) {
     return true;
 }
 
+cudaError_t shift_right_large(
+    BatchMPContext * context,
+    BatchMPArray A,
+    uint64_t shift_bits,
+    BatchMPArray B
+) {
+    const uint64_t limb_shift64 = shift_bits / 32u;
+    const uint32_t bit_shift = (uint32_t)(shift_bits % 32u);
+    if (limb_shift64 >= A.length) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t limb_shift = (uint32_t)limb_shift64;
+    BatchMPArray A_preshift = {
+        .data = A.data + limb_shift,
+        .length = A.length - limb_shift,
+        .batch_size = A.batch_size,
+        .stride = A.stride - limb_shift
+    };
+    return batch_mp_shift_bits(context, A_preshift, B, -(int32_t)bit_shift);
+}
+
 BatchMPArray make_array_view(uint32_t * data, uint32_t length, uint32_t stride = 0u) {
     return {
         .data = data,
@@ -1004,6 +1025,16 @@ struct RecursiveInverseArena {
     uint32_t next_limb;
 };
 
+uint32_t arena_mark(const RecursiveInverseArena * arena) {
+    return arena == nullptr ? 0u : arena->next_limb;
+}
+
+void arena_reset(RecursiveInverseArena * arena, uint32_t mark) {
+    if (arena != nullptr) {
+        arena->next_limb = mark;
+    }
+}
+
 BatchMPArray arena_alloc(RecursiveInverseArena * arena, uint32_t length) {
     if (arena == nullptr || arena->storage.data == nullptr) {
         return {};
@@ -1017,13 +1048,13 @@ BatchMPArray arena_alloc(RecursiveInverseArena * arena, uint32_t length) {
     return out;
 }
 
-size_t recursive_inverse_workspace_limbs(uint32_t x_length, uint32_t L, bool is_initial) {
+size_t recursive_inverse_workspace_limbs(uint32_t x_length, uint64_t L, bool is_initial) {
     if (L <= 256u) {
         return 0u;
     }
-    const uint32_t m = ((L - 2u) / 4u) & ~31u;
+    const uint64_t m = ((L - 2u) / 4u) & ~31ull;
     const uint32_t m_limbs = m / 32u;
-    const uint32_t L1 = L - m * 2u;
+    const uint64_t L1 = L - m * 2u;
     const uint32_t x1_length = (x_length > m_limbs) ? (x_length - m_limbs) : 1u;
     const uint32_t x2_length = std::min(x_length, m_limbs);
     const uint32_t y1_length = x1_length + 1u;
@@ -1036,12 +1067,14 @@ size_t recursive_inverse_workspace_limbs(uint32_t x_length, uint32_t L, bool is_
     const uint32_t shifted_y1_length = y1_length + m_limbs + 1u;
     const uint32_t shifted_res2_length = res2_length + m_limbs + 1u;
     const uint32_t y2_x_length = y2_length + x_length;
-
-    size_t total = y1_length + res1_length;
-    total += recursive_inverse_workspace_limbs(x1_length, L1, false);
-    total += x2_y1_length + shifted_res1_length + res2_length + y2_prod_length + y2_length + shifted_y1_length;
-    total += y2_x_length + shifted_res2_length;
-    return total;
+    const size_t child_prefix = (size_t)y1_length + res1_length;
+    const size_t child_peak = child_prefix + recursive_inverse_workspace_limbs(x1_length, L1, false);
+    size_t local_peak = (size_t)y1_length + res1_length +
+        x2_y1_length + shifted_res1_length + res2_length + y2_prod_length + y2_length + shifted_y1_length;
+    if (!is_initial) {
+        local_peak += y2_x_length + shifted_res2_length;
+    }
+    return std::max(child_peak, local_peak);
 }
 
 cudaError_t subtract_with_sign(
@@ -1078,7 +1111,7 @@ cudaError_t subtract_with_sign(
 cudaError_t recursive_inverse(
     BatchMPContext * context,
     BatchMPArray x,
-    uint32_t L,
+    uint64_t L,
     bool is_initial,
     BatchMPArray & y_out,
     BatchMPArray * res_out,
@@ -1106,9 +1139,10 @@ cudaError_t recursive_inverse(
         return err;
     }
 
-    const uint32_t m = ((L - 2u) / 4u) & ~31u;
+    const uint64_t m = ((L - 2u) / 4u) & ~31ull;
     const uint32_t m_limbs = m / 32u;
-    const uint32_t L1 = L - m * 2u;
+    const uint64_t L1 = L - m * 2u;
+    const uint32_t frame_mark = arena_mark(arena);
     BatchMPArray x1 = make_subview(x, m_limbs, x.length > m_limbs ? (x.length - m_limbs) : 0u);
     BatchMPArray x2 = make_subview(x, 0u, std::min(x.length, m_limbs));
 
@@ -1120,17 +1154,22 @@ cudaError_t recursive_inverse(
     if (res1.data == nullptr) {
         return cudaErrorMemoryAllocation;
     }
+    const uint32_t child_mark = arena_mark(arena);
 
     cudaError_t err = recursive_inverse(context, x1, L1, false, y1, &res1, arena);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
+    arena_reset(arena, child_mark);
     err = y1.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = res1.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
@@ -1138,80 +1177,97 @@ cudaError_t recursive_inverse(
     BatchMPArray shifted_res1 = arena_alloc(arena, res1.length + m_limbs + 1u);
     BatchMPArray res2 = arena_alloc(arena, std::max(shifted_res1.length, x2_y1.length) + 1u);
     if (x2_y1.data == nullptr || shifted_res1.data == nullptr || res2.data == nullptr) {
+        arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
 
     err = batch_mp_mul(context, x2, y1, x2_y1);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = x2_y1.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
     err = batch_mp_shift_bits(context, res1, shifted_res1, (int32_t)m);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = shifted_res1.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
     bool positive_branch = false;
     err = subtract_with_sign(context, shifted_res1, x2_y1, res2, &positive_branch);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
     BatchMPArray y2_prod = arena_alloc(arena, res2.length + y1.length);
     if (y2_prod.data == nullptr) {
+        arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
     err = batch_mp_mul(context, res2, y1, y2_prod);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = y2_prod.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
     BatchMPArray y2 = arena_alloc(arena, std::max<uint32_t>(2u, y2_prod.length));
     if (y2.data == nullptr) {
+        arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
-    err = batch_mp_shift_bits(context, y2_prod, y2, -(int32_t)L1);
+    err = shift_right_large(context, y2_prod, L1, y2);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = y2.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
     if (!positive_branch) {
         err = batch_mp_add_small(context, y2, 1u, y2);
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
         err = y2.compact(context);
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
     }
 
     BatchMPArray shifted_y1 = arena_alloc(arena, y1.length + m_limbs + 1u);
     if (shifted_y1.data == nullptr) {
+        arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
     err = batch_mp_shift_bits(context, y1, shifted_y1, (int32_t)m);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = shifted_y1.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
@@ -1221,10 +1277,12 @@ cudaError_t recursive_inverse(
         err = batch_mp_sub(context, shifted_y1, y2, y_out);
     }
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
     err = y_out.compact(context);
     if (err != cudaSuccess) {
+        arena_reset(arena, frame_mark);
         return err;
     }
 
@@ -1232,22 +1290,27 @@ cudaError_t recursive_inverse(
         BatchMPArray y2_x = arena_alloc(arena, y2.length + x.length);
         BatchMPArray shifted_res2 = arena_alloc(arena, res2.length + m_limbs + 1u);
         if (y2_x.data == nullptr || shifted_res2.data == nullptr) {
+            arena_reset(arena, frame_mark);
             return cudaErrorMemoryAllocation;
         }
         err = batch_mp_mul(context, y2, x, y2_x);
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
         err = y2_x.compact(context);
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
         err = batch_mp_shift_bits(context, res2, shifted_res2, (int32_t)m);
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
         err = shifted_res2.compact(context);
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
         if (positive_branch) {
@@ -1256,11 +1319,15 @@ cudaError_t recursive_inverse(
             err = batch_mp_sub(context, y2_x, shifted_res2, *res_out);
         }
         if (err != cudaSuccess) {
+            arena_reset(arena, frame_mark);
             return err;
         }
-        return res_out->compact(context);
+        err = res_out->compact(context);
+        arena_reset(arena, frame_mark);
+        return err;
     }
 
+    arena_reset(arena, frame_mark);
     return cudaSuccess;
 }
 
@@ -1546,16 +1613,23 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     err = profile_compact(context, Q_final, "Q", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
+    release_array(&Q_bs);
+    release_array(&R_shifted);
+    release_array(&P_15);
+    release_array(&Q_15);
+
     extra_limbs = std::max(0l, std::min((long)P_final.length, (long)Q_final.length) - prec_limbs);
     P_truncated_final = make_subview(P_final, (uint32_t)extra_limbs, P_final.length - (uint32_t)extra_limbs);
     Q_truncated_final = make_subview(Q_final, (uint32_t)extra_limbs, Q_final.length - (uint32_t)extra_limbs);
 
-    uint32_t q_bits_count = 0u;
-    err = compact_and_compute_bit_length(context, Q_truncated_final, &q_bits_count);
+    uint32_t q_bits_count_u32 = 0u;
+    err = compact_and_compute_bit_length(context, Q_truncated_final, &q_bits_count_u32);
     CHECK_AND_RETURN(err, release_all());
 
-    const uint32_t inverse_bits = q_bits_count * 2u - 1u;
-    inverse_workspace = batch_mp_array_create(1u, (uint32_t)recursive_inverse_workspace_limbs(Q_truncated_final.length, inverse_bits, true));
+    const uint64_t q_bits_count = q_bits_count_u32;
+    const uint64_t inverse_bits = q_bits_count * 2u - 1u;
+    const size_t inverse_workspace_limbs = recursive_inverse_workspace_limbs(Q_truncated_final.length, inverse_bits, true);
+    inverse_workspace = batch_mp_array_create(1u, (uint32_t)inverse_workspace_limbs);
     inv_q_final = batch_mp_array_create(1u, Q_truncated_final.length + 1u);
     if ((inverse_workspace.length != 0u && inverse_workspace.data == nullptr) || inv_q_final.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
@@ -1570,9 +1644,10 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     err = inv_q_final.compact(context);
     CHECK_AND_RETURN(err, release_all());
 
+    release_array(&Q_final);
+
     ret_product = batch_mp_array_create(1u, P_truncated_final.length + inv_q_final.length);
-    ret_final = batch_mp_array_create(1u, P_truncated_final.length + inv_q_final.length);
-    if (ret_product.data == nullptr || ret_final.data == nullptr) {
+    if (ret_product.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
     err = batch_mp_mul(context, P_truncated_final, inv_q_final, ret_product);
@@ -1580,25 +1655,26 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     err = ret_product.compact(context);
     CHECK_AND_RETURN(err, release_all());
 
-    const int32_t final_shift = -((int32_t)inverse_bits - prec_limbs * 32);
-    err = batch_mp_shift_bits(context, ret_product, ret_final, final_shift);
+    release_array(&P_final);
+    release_array(&inverse_workspace);
+    release_array(&inv_q_final);
+
+    ret_final = batch_mp_array_create(1u, ret_product.length);
+    if (ret_final.data == nullptr) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+    }
+
+    const uint64_t final_shift = inverse_bits - (uint64_t)prec_limbs * 32u;
+    err = shift_right_large(context, ret_product, final_shift, ret_final);
     CHECK_AND_RETURN(err, release_all());
     err = ret_final.compact(context);
     CHECK_AND_RETURN(err, release_all());
-
-    release_array(&Q_bs);
-    release_array(&R_shifted);
-    release_array(&P_15);
-    release_array(&Q_15);
-    release_array(&inverse_workspace);
-    release_array(&inv_q_final);
     release_array(&ret_product);
-    release_array(&P_final);
 
     P_base = ret_final;
-    Q_base = Q_final;
+    Q_base = {};
     P = ret_final;
-    Q = Q_truncated_final;
+    Q = {};
 
     return cudaSuccess;
 }
@@ -2056,8 +2132,8 @@ int main_fractional(int argc, char ** argv){
     cudaEventDestroy(start_event);
     cudaEventDestroy(stop_event);
 
-    if (P.batch_size != 1 || Q.batch_size != 1) {
-        fprintf(stderr, "Unexpected output batch size: P=%u Q=%u\n", P.batch_size, Q.batch_size);
+    if (P.batch_size != 1) {
+        fprintf(stderr, "Unexpected output batch size: RET=%u\n", P.batch_size);
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
