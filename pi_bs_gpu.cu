@@ -806,6 +806,21 @@ bool print_validation_summary(const BatchMPArray &Q, const BatchMPArray &R) {
     return true;
 }
 
+bool print_fractional_preview_summary(const BatchMPArray &P, const BatchMPArray &Q) {
+    uint32_t * p_host = nullptr;
+    uint32_t * q_host = nullptr;
+    if (!copy_device_array_to_host(P, &p_host) || !copy_device_array_to_host(Q, &q_host)) {
+        delete [] p_host;
+        delete [] q_host;
+        return false;
+    }
+    print_hex_preview_with_hash("P", p_host, P.length);
+    print_hex_preview_with_hash("Q", q_host, Q.length);
+    delete [] p_host;
+    delete [] q_host;
+    return true;
+}
+
 uint32_t limb_bit_length(uint32_t limb) {
     return limb == 0 ? 0u : 32u - (uint32_t)__builtin_clz(limb);
 }
@@ -1071,6 +1086,125 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
         Q = next_Q;
     }
     cudaFree(d_work);
+    return cudaSuccess;
+}
+
+cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q, BatchMPArray & P_base, BatchMPArray & Q_base, StageProfiler * profiler = nullptr) {
+    /*
+    q, r = binary_split(0, N * 17, True)
+    r = r >> (15 * (N * 17) - 8)
+
+    p_15, q_15 = sqrt_10005(digits)
+
+    q, r = truncate_limbs_quotient(q, r, prec_limbs)
+
+    p_final = p_15 * q
+    q_final = r * q_15
+
+    p_final, q_final = truncate_limbs_quotient(p_final, q_final, prec_limbs)
+    */
+    int N = 1;
+    while (N * 17 * 14.3 < target_digits) {
+        N *= 2;
+    }
+    int prec_limbs = ((long)(target_digits * 3.322) + 31) / 32 + 1;
+    BatchMPArray Q_bs{}, R_bs{};
+    BatchMPArray R_shifted{};
+    BatchMPArray P_15{}, Q_15{};
+    BatchMPArray P_final{};
+    BatchMPArray Q_final{};
+    auto release_all = [&]() {
+        release_array(&Q_bs);
+        release_array(&R_bs);
+        release_array(&R_shifted);
+        release_array(&P_15);
+        release_array(&Q_15);
+        if (P_base.data == nullptr) {
+            release_array(&P_final);
+        }
+        if (Q_base.data == nullptr) {
+            release_array(&Q_final);
+        }
+    };
+
+    cudaError_t err = binary_split_batched(context, N, Q_bs, R_bs, profiler);
+    CHECK_AND_RETURN(err, release_all());
+    long r_total_shift = 15ull * N * 17 - 8;
+    int r_total_shift_bits = r_total_shift % 32;
+    int r_total_shift_limbs = r_total_shift / 32;
+
+    BatchMPArray R_preshift = {
+        .data = R_bs.data + r_total_shift_limbs,
+        .length = R_bs.length - r_total_shift_limbs,
+        .batch_size = 1,
+        .stride = R_bs.length - r_total_shift_limbs
+    };
+    R_shifted = batch_mp_array_create(1, R_preshift.length + 1);
+    if (R_shifted.data == nullptr) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+    }
+    err = batch_mp_shift_bits(context, R_preshift, R_shifted, -r_total_shift_bits);
+    CHECK_AND_RETURN(err, release_all());
+    batch_mp_array_release(R_bs);
+    R_bs = {};
+    err = R_shifted.compact(context);
+    CHECK_AND_RETURN(err, release_all());
+
+    int extra_limbs = std::max(0l, std::min((long)Q_bs.length, (long)R_shifted.length) - prec_limbs);
+    BatchMPArray Q_truncated = {
+        .data = Q_bs.data + extra_limbs,
+        .length = Q_bs.length - extra_limbs,
+        .batch_size = 1,
+        .stride = Q_bs.length - extra_limbs
+    };
+    BatchMPArray R_truncated = {
+        .data = R_shifted.data + extra_limbs,
+        .length = R_shifted.length - extra_limbs,
+        .batch_size = 1,
+        .stride = R_shifted.length - extra_limbs
+    };
+
+    err = sqrt_10005(context, target_digits, P_15, Q_15, profiler);
+    CHECK_AND_RETURN(err, release_all());
+
+    P_final = batch_mp_array_create(1, P_15.length + Q_truncated.length);
+    Q_final = batch_mp_array_create(1, Q_15.length + R_truncated.length);
+    if (P_final.data == nullptr || Q_final.data == nullptr) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+    }
+
+    err = profile_mul(context, P_15, Q_truncated, P_final, "P15*Q", (uint32_t)target_digits, profiler);
+    CHECK_AND_RETURN(err, release_all());
+    err = profile_mul(context, R_truncated, Q_15, Q_final, "R*Q15", (uint32_t)target_digits, profiler);
+    CHECK_AND_RETURN(err, release_all());
+
+    err = profile_compact(context, P_final, "P", (uint32_t)target_digits, profiler);
+    CHECK_AND_RETURN(err, release_all());
+    err = profile_compact(context, Q_final, "Q", (uint32_t)target_digits, profiler);
+    CHECK_AND_RETURN(err, release_all());
+
+    release_array(&Q_bs);
+    release_array(&R_shifted);
+    release_array(&P_15);
+    release_array(&Q_15);
+
+    P_base = P_final;
+    Q_base = Q_final;
+
+    extra_limbs = std::max(0l, std::min((long)P_final.length, (long)Q_final.length) - prec_limbs);
+    P = {
+        .data = P_final.data + extra_limbs,
+        .length = P_final.length - extra_limbs,
+        .batch_size = 1,
+        .stride = P_final.length - extra_limbs
+    };
+    Q = {
+        .data = Q_final.data + extra_limbs,
+        .length = Q_final.length - extra_limbs,
+        .batch_size = 1,
+        .stride = Q_final.length - extra_limbs
+    };
+
     return cudaSuccess;
 }
 
@@ -1460,7 +1594,203 @@ int main_sqrt_10005(int argc, char ** argv){
     return 0;
 }
 
+int main_fractional(int argc, char ** argv){
+    int target_digits = 0;
+    if (argc < 2 || !parse_int_arg(argv[1], &target_digits) || target_digits < 0) {
+        fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
+        return 1;
+    }
+    bool benchmark_only = false;
+    bool profile_stages = false;
+    bool print_result = true;
+    if (argc >= 3) {
+        if (strcmp(argv[2], "--benchmark") == 0) {
+            benchmark_only = true;
+            print_result = false;
+        } else if (strcmp(argv[2], "--profile-stages") == 0) {
+            profile_stages = true;
+            print_result = false;
+        } else {
+            fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
+            return 1;
+        }
+    }
+
+    BatchMPContext * context = batch_mp_init();
+    if (context == nullptr) {
+        fprintf(stderr, "batch_mp_init failed\n");
+        return 1;
+    }
+
+    BatchMPArray P{};
+    BatchMPArray Q{};
+    BatchMPArray P_base{};
+    BatchMPArray Q_base{};
+    StageProfiler profiler{};
+    cudaEvent_t start_event = nullptr;
+    cudaEvent_t stop_event = nullptr;
+    if (!check_cuda(cudaEventCreate(&start_event), "cudaEventCreate(start)") ||
+        !check_cuda(cudaEventCreate(&stop_event), "cudaEventCreate(stop)")) {
+        if (start_event != nullptr) cudaEventDestroy(start_event);
+        if (stop_event != nullptr) cudaEventDestroy(stop_event);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
+        !check_cuda(pi_fractional(context, target_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
+        !check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)") ||
+        !check_cuda(cudaEventSynchronize(stop_event), "cudaEventSynchronize(stop)")) {
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    float elapsed_ms = 0.0f;
+    if (!check_cuda(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime")) {
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 1;
+    }
+    cudaEventDestroy(start_event);
+    cudaEventDestroy(stop_event);
+
+    if (P.batch_size != 1 || Q.batch_size != 1) {
+        fprintf(stderr, "Unexpected output batch size: P=%u Q=%u\n", P.batch_size, Q.batch_size);
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    if (benchmark_only) {
+        printf(
+            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            target_digits,
+            P.length,
+            Q.length,
+            elapsed_ms,
+            (int)(batch_mp_workspace_size(context) / (1024 * 1024))
+        );
+        if (!print_fractional_preview_summary(P, Q)) {
+            release_array(&P_base);
+            release_array(&Q_base);
+            batch_mp_destroy(context);
+            return 1;
+        }
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 0;
+    }
+
+    if (profile_stages) {
+        float total_leaf_ms = 0.0f;
+        float total_mul_ms = 0.0f;
+        float total_mul_small_ms = 0.0f;
+        float total_shift_ms = 0.0f;
+        float total_add_ms = 0.0f;
+        float total_sub_ms = 0.0f;
+        float total_compact_ms = 0.0f;
+        float total_exactdiv_ms = 0.0f;
+        float total_ntt_ms = 0.0f;
+        for (int idx = 0; idx < profiler.count; ++idx) {
+            const StageProfileEntry & entry = profiler.entries[idx];
+            if (strcmp(entry.kind, "leaf") == 0) {
+                total_leaf_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "mul") == 0) {
+                total_mul_ms += entry.elapsed_ms;
+                if (entry.uses_ntt) {
+                    total_ntt_ms += entry.elapsed_ms;
+                }
+            } else if (strcmp(entry.kind, "mul_small") == 0) {
+                total_mul_small_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "shift") == 0) {
+                total_shift_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "add") == 0) {
+                total_add_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "sub") == 0) {
+                total_sub_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "compact") == 0) {
+                total_compact_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "exactdiv") == 0) {
+                total_exactdiv_ms += entry.elapsed_ms;
+            }
+            printf(
+                "stage[%03d] kind=%9s label=%18s digits=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
+                idx,
+                entry.kind,
+                entry.label,
+                entry.n1,
+                entry.batch_size,
+                entry.lhs_length,
+                entry.rhs_length,
+                entry.elapsed_ms,
+                entry.uses_ntt ? 1 : 0
+            );
+        }
+        printf(
+            "leaf_total_ms=%.3f mul_total_ms=%.3f mul_small_total_ms=%.3f shift_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f exactdiv_total_ms=%.3f ntt_total_ms=%.3f\n",
+            total_leaf_ms,
+            total_mul_ms,
+            total_mul_small_ms,
+            total_shift_ms,
+            total_add_ms,
+            total_sub_ms,
+            total_compact_ms,
+            total_exactdiv_ms,
+            total_ntt_ms
+        );
+        const float accounted_ms = total_leaf_ms + total_mul_ms + total_mul_small_ms + total_shift_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
+        printf(
+            "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            target_digits,
+            P.length,
+            Q.length,
+            elapsed_ms,
+            accounted_ms,
+            (int)(batch_mp_workspace_size(context) / (1024 * 1024))
+        );
+        if (!print_fractional_preview_summary(P, Q)) {
+            release_array(&P_base);
+            release_array(&Q_base);
+            batch_mp_destroy(context);
+            return 1;
+        }
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 0;
+    }
+
+    printf(
+        "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f\n",
+        target_digits,
+        P.length,
+        Q.length,
+        elapsed_ms
+    );
+    if (print_result && (!print_full_hex_value("P", P) || !print_full_hex_value("Q", Q))) {
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    release_array(&P_base);
+    release_array(&Q_base);
+    batch_mp_destroy(context);
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     //return main_bs(argc, argv);
-    return main_sqrt_10005(argc, argv);
+    //return main_sqrt_10005(argc, argv);
+    return main_fractional(argc, argv);
 }
