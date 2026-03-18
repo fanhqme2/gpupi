@@ -104,12 +104,13 @@ def limb_length(value):
 
 
 def int_to_limbs(value):
-    limbs = []
-    value = int(value)
-    while value:
-        limbs.append(value & 0xffffffff)
-        value >>= 32
-    return limbs
+    hex_value = int_to_hex(value)
+    if hex_value == "0":
+        return []
+
+    # Left-pad so each 32-bit limb is a fixed-width 8-hex-digit chunk.
+    padded = hex_value.zfill(((len(hex_value) + 7) // 8) * 8)
+    return [int(padded[i - 8:i], 16) for i in range(len(padded), 0, -8)]
 
 
 def parse_cuda_output(text):
@@ -165,9 +166,6 @@ def main():
     N = int(sys.argv[1])
     binary = sys.argv[2] if len(sys.argv) >= 3 else "./pi_bs_gpu"
 
-    q, r = binary_split(0, N * 17, is_initial=True)
-    expected = {"Q": q, "R": r}
-
     result = subprocess.run(
         [binary, str(N)],
         check=True,
@@ -175,6 +173,9 @@ def main():
         text=True,
     )
     actual = parse_cuda_output(result.stdout)
+
+    q, r = binary_split(0, N * 17, is_initial=True)
+    expected = {"Q": q, "R": r}
 
     ok = compare_value("Q", expected['Q'], actual['Q']) and compare_value("R", expected['R'], actual['R'])
 

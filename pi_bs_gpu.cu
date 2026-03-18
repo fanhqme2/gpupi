@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "batch_arith.h"
 #include "batch_mul_naive.h"
@@ -145,6 +146,8 @@ namespace {
 
 constexpr uint32_t kBlockCommonDivisorLo = 830297u;
 constexpr uint32_t kBlockCommonDivisorHi = 156590819u;
+constexpr uint32_t kValidationMod = 1000000007u;
+constexpr uint64_t kLimbBaseMod = (1ull << 32) % kValidationMod;
 
 cudaError_t append_stage_profile(
     StageProfiler * profiler,
@@ -352,17 +355,18 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     BatchMPArray R_prod_1{};
     BatchMPArray R_prod_2{};
 
-    uint32_t * temp_prod_workspace;
-    cudaMalloc(&temp_prod_workspace,(
+    uint32_t * temp_prod_workspace = nullptr;
+    cudaError_t temp_workspace_err = cudaMalloc(&temp_prod_workspace,(
         N * 3ull + 
         N * 4ull +
         N * 6ull +
         N * 88ull +
         N * 72ull
     ) * 4);
-    if (temp_prod_workspace == nullptr) {
-        return cudaErrorMemoryAllocation;
+    if (temp_workspace_err != cudaSuccess || temp_prod_workspace == nullptr) {
+        return temp_workspace_err != cudaSuccess ? temp_workspace_err : cudaErrorMemoryAllocation;
     }
+    uint32_t * const temp_prod_workspace_base = temp_prod_workspace;
     
     if (context == nullptr || (N & (N - 1)) != 0) {
         return cudaErrorInvalidValue;
@@ -381,7 +385,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         release_array(P_next);
         release_array(Q_next);
         release_array(R_next);
-        cudaFree(temp_prod_workspace);
+        cudaFree(temp_prod_workspace_base);
     };
 
     P0 = {.data = temp_prod_workspace, .length = 3, .batch_size = (uint32_t)N,  .stride = 3};
@@ -621,7 +625,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     release_array(P_next);
     release_array(Q_next);
     release_array(R_next);
-    cudaFree(temp_prod_workspace);
+    cudaFree(temp_prod_workspace_base);
     return cudaSuccess;
 }
 
@@ -666,9 +670,278 @@ bool check_cuda(cudaError_t err, const char * what) {
     return false;
 }
 
+bool copy_device_array_to_host(const BatchMPArray & array, uint32_t ** host_data) {
+    if (host_data == nullptr) {
+        return false;
+    }
+    *host_data = nullptr;
+    if (array.length == 0) {
+        return true;
+    }
+    uint32_t * buffer = new uint32_t[array.length];
+    if (!check_cuda(cudaMemcpy(buffer, array.data, array.length * sizeof(uint32_t), cudaMemcpyDeviceToHost), "cudaMemcpy(DeviceToHost)")) {
+        delete [] buffer;
+        return false;
+    }
+    *host_data = buffer;
+    return true;
+}
+
+uint32_t compute_mod_hash(const uint32_t * limbs, uint32_t length) {
+    uint64_t value = 0;
+    for (int i = (int)length - 1; i >= 0; --i) {
+        value = (value * kLimbBaseMod + limbs[i]) % kValidationMod;
+    }
+    return (uint32_t)value;
+}
+
+void print_hex_preview_with_hash(const char * label, const uint32_t * limbs, uint32_t length) {
+    const uint32_t hash = compute_mod_hash(limbs, length);
+    if (length == 0) {
+        printf("%s = 0 hash = %u\n", label, hash);
+        return;
+    }
+    const uint32_t first_count = std::min(length, 2u);
+    const uint32_t last_count = std::min(length, 2u);
+    printf("%s = ", label);
+    for (uint32_t i = 0; i < last_count; ++i) {
+        const uint32_t limb_index = length - 1 - i;
+        if (i == 0) {
+            printf("%x", limbs[limb_index]);
+        } else {
+            printf("%08x", limbs[limb_index]);
+        }
+    }
+    if (length > first_count + last_count) {
+        printf("...");
+    }
+    for (uint32_t i = first_count; i > 0; --i) {
+        const uint32_t limb_index = i - 1;
+        if (length <= first_count + last_count && limb_index >= length - last_count) {
+            continue;
+        }
+        printf("%08x", limbs[limb_index]);
+    }
+    printf(" hash = %u\n", hash);
+}
+
+bool print_validation_summary(const BatchMPArray &Q, const BatchMPArray &R) {
+    uint32_t * q_host = nullptr;
+    uint32_t * r_host = nullptr;
+    if (!copy_device_array_to_host(Q, &q_host) || !copy_device_array_to_host(R, &r_host)) {
+        delete [] q_host;
+        delete [] r_host;
+        return false;
+    }
+    print_hex_preview_with_hash("Q", q_host, Q.length);
+    print_hex_preview_with_hash("R", r_host, R.length);
+    delete [] q_host;
+    delete [] r_host;
+    return true;
+}
+
+bool print_full_hex_value(const char * label, const BatchMPArray & array) {
+    uint32_t * host = nullptr;
+    if (!copy_device_array_to_host(array, &host)) {
+        return false;
+    }
+    printf("%s = ", label);
+    if (array.length == 0) {
+        printf("0\n");
+        delete [] host;
+        return true;
+    }
+    for (int i = (int)array.length - 1; i >= 0; --i) {
+        if (i == (int)array.length - 1) {
+            printf("%x", host[i]);
+        } else {
+            printf("%08x", host[i]);
+        }
+    }
+    printf("\n");
+    delete [] host;
+    return true;
+}
+
+cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q) {
+    /*
+    p_15 = mpz(4001)
+    q_15 = mpz(40)
+    valid_terms = 7.5
+
+    while valid_terms < target_digits:
+        valid_terms *= 2
+        p_15, q_15 = (
+            p_15 * p_15 + 10005 * q_15 * q_15,
+            p_15 * q_15 * 2,
+        )
+    */
+    double log_p_15 = log(4001.0);
+    double log_q_15 = log(40.0);
+    double valid_digits = 7.5;
+    uint32_t total_work_memory = 0;
+    uint32_t P_memory = 0, Q_memory = 0;
+    if (valid_digits < target_digits){
+        total_work_memory += 4;
+        total_work_memory += 4;
+    }else{
+        P_memory = 4;
+        Q_memory = 4;
+    }
+    while (valid_digits < target_digits){
+        double old_log_p_15 = log_p_15;
+        double old_log_q_15 = log_q_15;
+        log_p_15 = old_log_p_15 * 2 + log1p(10005.0 * exp(2 * old_log_q_15 - 2 * old_log_p_15));
+        log_q_15 = old_log_p_15 + old_log_q_15 + log(2.0);
+        valid_digits *= 2;
+        if (valid_digits < target_digits){
+            total_work_memory += (ceil(log_p_15 / log(2.0) / 32) * 4 + 8) * 4;
+            total_work_memory += (ceil(log_q_15 / log(2.0) / 32) * 4 + 8) * 2;
+        }else{
+            total_work_memory += (ceil(log_p_15 / log(2.0) / 32) * 4 + 8) * 3;
+            total_work_memory += (ceil(log_q_15 / log(2.0) / 32) * 4 + 8) * 1;
+            P_memory = ceil(log_p_15 / log(2.0) / 32) * 4 + 8;
+            Q_memory = ceil(log_q_15 / log(2.0) / 32) * 4 + 8;
+        }
+    }
+    uint32_t * d_P = nullptr;
+    uint32_t * d_Q = nullptr;
+    uint32_t * d_work = nullptr;
+    auto release_all = [&]() {
+        if (d_P != nullptr) {
+            cudaFree(d_P);
+            d_P = nullptr;
+        }
+        if (d_Q != nullptr) {
+            cudaFree(d_Q);
+            d_Q = nullptr;
+        }
+        if (d_work != nullptr) {
+            cudaFree(d_work);
+            d_work = nullptr;
+        }
+    };
+    cudaError_t err = cudaMalloc(&d_P, P_memory);
+    CHECK_AND_RETURN(err, release_all());
+    err = cudaMalloc(&d_Q, Q_memory);
+    CHECK_AND_RETURN(err, release_all());
+    if (total_work_memory > 0) {
+        err = cudaMalloc(&d_work, total_work_memory);
+        CHECK_AND_RETURN(err, release_all());
+    }
+    uint32_t * cur_work_memory = d_work;
+    uint32_t * cur_P, * cur_Q;
+    valid_digits = 7.5;
+    if (valid_digits < target_digits){
+        cur_P = cur_work_memory;
+        cur_work_memory += 1;
+        cur_Q = cur_work_memory;
+        cur_work_memory += 1;
+    }else{
+        cur_P = d_P;
+        cur_Q = d_Q;
+    }
+    uint32_t p_15_init[1] = {4001};
+    uint32_t q_15_init[1] = {40};
+    err = cudaMemcpy(cur_P, p_15_init, sizeof(p_15_init), cudaMemcpyHostToDevice);
+    CHECK_AND_RETURN(err, release_all());
+    err = cudaMemcpy(cur_Q, q_15_init, sizeof(q_15_init), cudaMemcpyHostToDevice);
+    CHECK_AND_RETURN(err, release_all());
+    P = {.data = cur_P, .length = 1, .batch_size = 1, .stride = 1};
+    Q = {.data = cur_Q, .length = 1, .batch_size = 1, .stride = 1};
+    while (valid_digits < target_digits){
+        valid_digits *= 2;
+        BatchMPArray next_PQ = {
+            .data = cur_work_memory,
+            .length = P.length + Q.length,
+            .batch_size = 1,
+            .stride = P.length + Q.length
+        };
+        cur_work_memory += P.length + Q.length;
+        err = batch_mp_mul(context, P, Q, next_PQ);
+        CHECK_AND_RETURN(err, release_all());
+        err = next_PQ.compact(context);
+        CHECK_AND_RETURN(err, release_all());
+        
+        BatchMPArray next_Q = {
+            .data = nullptr,
+            .length = next_PQ.length + 1,
+            .batch_size = 1,
+            .stride = next_PQ.length + 1
+        };
+        if (valid_digits < target_digits){
+            next_Q.data = cur_work_memory;
+            cur_work_memory += next_Q.length;
+        }else{
+            next_Q.data = d_Q;
+        }
+        err = batch_mp_shift_bits(context, next_PQ, next_Q, 1);
+        CHECK_AND_RETURN(err, release_all());
+        err = next_Q.compact(context);
+        CHECK_AND_RETURN(err, release_all());
+
+        BatchMPArray next_PP = {
+            .data = cur_work_memory,
+            .length = P.length * 2,
+            .batch_size = 1,
+            .stride = P.length * 2
+        };
+        cur_work_memory += next_PP.length;
+        err = batch_mp_mul(context, P, P, next_PP);
+        CHECK_AND_RETURN(err, release_all());
+        err = next_PP.compact(context);
+        CHECK_AND_RETURN(err, release_all());
+
+        BatchMPArray next_QQ = {
+            .data = cur_work_memory,
+            .length = Q.length * 2,
+            .batch_size = 1,
+            .stride = Q.length * 2
+        };
+        cur_work_memory += next_QQ.length;
+        err = batch_mp_mul(context, Q, Q, next_QQ);
+        CHECK_AND_RETURN(err, release_all());
+        err = next_QQ.compact(context);
+        CHECK_AND_RETURN(err, release_all());
+
+        BatchMPArray next_QQ_10005 = {
+            .data = cur_work_memory,
+            .length = next_QQ.length + 1,
+            .batch_size = 1,
+            .stride = next_QQ.length + 1
+        };
+        cur_work_memory += next_QQ_10005.length;
+        err = batch_mp_mul_small(context, next_QQ, 10005, next_QQ_10005);
+        CHECK_AND_RETURN(err, release_all());
+        err = next_QQ_10005.compact(context);
+        CHECK_AND_RETURN(err, release_all());
+        BatchMPArray next_P = {
+            .data = nullptr,
+            .length = max(next_PP.length, next_QQ_10005.length) + 1,
+            .batch_size = 1,
+            .stride = max(next_PP.length, next_QQ_10005.length) + 1
+        };
+        if (valid_digits < target_digits){
+            next_P.data = cur_work_memory;
+            cur_work_memory += next_P.length;
+        }else{
+            next_P.data = d_P;
+        }
+        err = batch_mp_add(context, next_PP, next_QQ_10005, next_P);
+        CHECK_AND_RETURN(err, release_all());
+        err = next_P.compact(context);
+        CHECK_AND_RETURN(err, release_all());
+
+        P = next_P;
+        Q = next_Q;
+    }
+    cudaFree(d_work);
+    return cudaSuccess;
+}
+
 }  // namespace
 
-int main(int argc, char ** argv){
+int main_bs(int argc, char ** argv){
     int N = 0;
     if (argc < 2) {
         print_usage(argv[0]);
@@ -754,6 +1027,12 @@ int main(int argc, char ** argv){
             R.length,
             elapsed_ms
         );
+        if (!print_validation_summary(Q, R)) {
+            release_array(&Q);
+            release_array(&R);
+            batch_mp_destroy(context);
+            return 1;
+        }
         release_array(&Q);
         release_array(&R);
         batch_mp_destroy(context);
@@ -809,11 +1088,17 @@ int main(int argc, char ** argv){
             total_ntt_ms
         );
         float accounted = total_leaf_ms + total_mul_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
-        printf("N=%d elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n", N, elapsed_ms, accounted, (int)(batch_mp_workspace_size(context) / (1024 * 1024)));
-        // release_array(&Q);
-        // release_array(&R);
-        // batch_mp_destroy(context);
-        // return 0;
+        printf("N=%d Q_len=%u R_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n", N, Q.length, R.length, elapsed_ms, accounted, (int)(batch_mp_workspace_size(context) / (1024 * 1024)));
+        if (!print_validation_summary(Q, R)) {
+            release_array(&Q);
+            release_array(&R);
+            batch_mp_destroy(context);
+            return 1;
+        }
+        release_array(&Q);
+        release_array(&R);
+        batch_mp_destroy(context);
+        return 0;
     }
 
     printf(
@@ -852,4 +1137,58 @@ int main(int argc, char ** argv){
     release_array(&R);
     batch_mp_destroy(context);
     return 0;
+}
+
+int main_sqrt_10005(int argc, char ** argv){
+    int target_digits = 0;
+    if (argc < 2 || !parse_int_arg(argv[1], &target_digits) || target_digits < 0) {
+        fprintf(stderr, "Usage: %s <target_digits>\n", argv[0]);
+        return 1;
+    }
+
+    BatchMPContext * context = batch_mp_init();
+    if (context == nullptr) {
+        fprintf(stderr, "batch_mp_init failed\n");
+        return 1;
+    }
+
+    BatchMPArray P{};
+    BatchMPArray Q{};
+    if (!check_cuda(sqrt_10005(context, target_digits, P, Q), "sqrt_10005")) {
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    if (P.batch_size != 1 || Q.batch_size != 1) {
+        fprintf(stderr, "Unexpected output batch size: P=%u Q=%u\n", P.batch_size, Q.batch_size);
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    printf(
+        "target_digits=%d P_len=%u Q_len=%u\n",
+        target_digits,
+        P.length,
+        Q.length
+    );
+    if (!print_full_hex_value("P", P) || !print_full_hex_value("Q", Q)) {
+        release_array(&P);
+        release_array(&Q);
+        batch_mp_destroy(context);
+        return 1;
+    }
+
+    release_array(&P);
+    release_array(&Q);
+    batch_mp_destroy(context);
+    return 0;
+}
+
+int main(int argc, char ** argv) {
+    return main_bs(argc, argv);
+    //return main_sqrt_10005(argc, argv);
 }
