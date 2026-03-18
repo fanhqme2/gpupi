@@ -145,6 +145,22 @@ def recursive_inverse(x, L, is_initial = False):
 
 def main():
     target_digits = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
+
+    
+    proc = subprocess.run(
+        ["./pi_bs_gpu", str(target_digits)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r"^RET = ([0-9a-fA-F]+)$", proc.stdout, re.MULTILINE)
+    if match is None:
+        sys.stderr.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        raise RuntimeError("failed to parse RET from pi_bs_gpu output")
+    gpu_ret = mpz(match.group(1), 16)
+
+    
     prec_limbs = (int(target_digits * 3.322) + 31) // 32 + 1
     n = 1
     while n * 17 * 14.3 < target_digits:
@@ -166,18 +182,6 @@ def main():
 
     ret_final = (p_final * inv_q_final) >> (q_bits_count * 2 - 1 - prec_limbs * 32)
 
-    proc = subprocess.run(
-        ["./pi_bs_gpu", str(target_digits)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    match = re.search(r"^RET = ([0-9a-fA-F]+)$", proc.stdout, re.MULTILINE)
-    if match is None:
-        sys.stderr.write(proc.stdout)
-        sys.stderr.write(proc.stderr)
-        raise RuntimeError("failed to parse RET from pi_bs_gpu output")
-    gpu_ret = mpz(match.group(1), 16)
     assert gpu_ret == ret_final
     print(f"matched digits={target_digits}")
 

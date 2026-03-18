@@ -141,7 +141,7 @@ struct StageProfileEntry {
 };
 
 struct StageProfiler {
-    StageProfileEntry entries[512];
+    StageProfileEntry entries[2048];
     int count;
 };
 
@@ -370,6 +370,50 @@ cudaError_t profile_add(
         false,
         profiler,
         [&]() { return batch_mp_add(context, A, B, C); }
+    );
+}
+
+cudaError_t profile_sub(
+    BatchMPContext * context,
+    BatchMPArray A,
+    BatchMPArray B,
+    BatchMPArray C,
+    const char * label,
+    uint32_t digits,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "sub",
+        label,
+        digits,
+        A.batch_size,
+        A.length,
+        B.length,
+        false,
+        profiler,
+        [&]() { return batch_mp_sub(context, A, B, C); }
+    );
+}
+
+cudaError_t profile_add_small(
+    BatchMPContext * context,
+    BatchMPArray A,
+    uint32_t value,
+    BatchMPArray C,
+    const char * label,
+    uint32_t digits,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "add",
+        label,
+        digits,
+        A.batch_size,
+        A.length,
+        1,
+        false,
+        profiler,
+        [&]() { return batch_mp_add_small(context, A, value, C); }
     );
 }
 
@@ -946,7 +990,10 @@ cudaError_t shift_right_large(
     BatchMPContext * context,
     BatchMPArray A,
     uint64_t shift_bits,
-    BatchMPArray B
+    BatchMPArray B,
+    const char * label = nullptr,
+    uint32_t digits = 0u,
+    StageProfiler * profiler = nullptr
 ) {
     const uint64_t limb_shift64 = shift_bits / 32u;
     const uint32_t bit_shift = (uint32_t)(shift_bits % 32u);
@@ -960,7 +1007,10 @@ cudaError_t shift_right_large(
         .batch_size = A.batch_size,
         .stride = A.stride - limb_shift
     };
-    return batch_mp_shift_bits(context, A_preshift, B, -(int32_t)bit_shift);
+    if (profiler == nullptr || label == nullptr) {
+        return batch_mp_shift_bits(context, A_preshift, B, -(int32_t)bit_shift);
+    }
+    return profile_shift_bits(context, A_preshift, B, -(int32_t)bit_shift, label, digits, profiler);
 }
 
 BatchMPArray make_array_view(uint32_t * data, uint32_t length, uint32_t stride = 0u) {
@@ -1048,8 +1098,10 @@ BatchMPArray arena_alloc(RecursiveInverseArena * arena, uint32_t length) {
     return out;
 }
 
+const uint64_t inverse_cpu_limit = 1048576u;
+
 size_t recursive_inverse_workspace_limbs(uint32_t x_length, uint64_t L, bool is_initial) {
-    if (L <= 256u) {
+    if (L <= inverse_cpu_limit) {
         return 0u;
     }
     const uint64_t m = ((L - 2u) / 4u) & ~31ull;
@@ -1082,12 +1134,16 @@ cudaError_t subtract_with_sign(
     BatchMPArray A,
     BatchMPArray B,
     BatchMPArray & diff,
-    bool * a_ge_b
+    bool * a_ge_b,
+    const char * label_ab,
+    const char * label_ba,
+    uint32_t digits,
+    StageProfiler * profiler
 ) {
     if (a_ge_b == nullptr) {
         return cudaErrorInvalidValue;
     }
-    cudaError_t err = batch_mp_sub(context, A, B, diff);
+    cudaError_t err = profile_sub(context, A, B, diff, label_ab, digits, profiler);
     if (err != cudaSuccess) {
         return err;
     }
@@ -1100,7 +1156,7 @@ cudaError_t subtract_with_sign(
         *a_ge_b = true;
         return diff.compact(context);
     }
-    err = batch_mp_sub(context, B, A, diff);
+    err = profile_sub(context, B, A, diff, label_ba, digits, profiler);
     if (err != cudaSuccess) {
         return err;
     }
@@ -1115,9 +1171,11 @@ cudaError_t recursive_inverse(
     bool is_initial,
     BatchMPArray & y_out,
     BatchMPArray * res_out,
-    RecursiveInverseArena * arena
+    RecursiveInverseArena * arena,
+    uint32_t digits,
+    StageProfiler * profiler
 ) {
-    if (L <= 256u) {
+    if (L <= inverse_cpu_limit) {
         mpz_t x_mpz;
         mpz_t total_mpz;
         mpz_t y_mpz;
@@ -1156,18 +1214,18 @@ cudaError_t recursive_inverse(
     }
     const uint32_t child_mark = arena_mark(arena);
 
-    cudaError_t err = recursive_inverse(context, x1, L1, false, y1, &res1, arena);
+    cudaError_t err = recursive_inverse(context, x1, L1, false, y1, &res1, arena, digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
     arena_reset(arena, child_mark);
-    err = y1.compact(context);
+    err = profile_compact(context, y1, "inv_y1", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = res1.compact(context);
+    err = profile_compact(context, res1, "inv_res1", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
@@ -1181,30 +1239,30 @@ cudaError_t recursive_inverse(
         return cudaErrorMemoryAllocation;
     }
 
-    err = batch_mp_mul(context, x2, y1, x2_y1);
+    err = profile_mul(context, x2, y1, x2_y1, "inv_x2*y1", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = x2_y1.compact(context);
+    err = profile_compact(context, x2_y1, "inv_x2*y1", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
 
-    err = batch_mp_shift_bits(context, res1, shifted_res1, (int32_t)m);
+    err = profile_shift_bits(context, res1, shifted_res1, (int32_t)m, "inv_res1<<m", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = shifted_res1.compact(context);
+    err = profile_compact(context, shifted_res1, "inv_res1<<m", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
 
     bool positive_branch = false;
-    err = subtract_with_sign(context, shifted_res1, x2_y1, res2, &positive_branch);
+    err = subtract_with_sign(context, shifted_res1, x2_y1, res2, &positive_branch, "inv_res1<<m-x2*y1", "inv_x2*y1-res1<<m", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
@@ -1215,12 +1273,12 @@ cudaError_t recursive_inverse(
         arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
-    err = batch_mp_mul(context, res2, y1, y2_prod);
+    err = profile_mul(context, res2, y1, y2_prod, "inv_res2*y1", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = y2_prod.compact(context);
+    err = profile_compact(context, y2_prod, "inv_res2*y1", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
@@ -1231,24 +1289,24 @@ cudaError_t recursive_inverse(
         arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
-    err = shift_right_large(context, y2_prod, L1, y2);
+    err = shift_right_large(context, y2_prod, L1, y2, "inv_y2", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = y2.compact(context);
+    err = profile_compact(context, y2, "inv_y2", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
 
     if (!positive_branch) {
-        err = batch_mp_add_small(context, y2, 1u, y2);
+        err = profile_add_small(context, y2, 1u, y2, "inv_y2+1", digits, profiler);
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
         }
-        err = y2.compact(context);
+        err = profile_compact(context, y2, "inv_y2+1", digits, profiler);
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
@@ -1260,27 +1318,27 @@ cudaError_t recursive_inverse(
         arena_reset(arena, frame_mark);
         return cudaErrorMemoryAllocation;
     }
-    err = batch_mp_shift_bits(context, y1, shifted_y1, (int32_t)m);
+    err = profile_shift_bits(context, y1, shifted_y1, (int32_t)m, "inv_y1<<m", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = shifted_y1.compact(context);
+    err = profile_compact(context, shifted_y1, "inv_y1<<m", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
 
     if (positive_branch) {
-        err = batch_mp_add(context, shifted_y1, y2, y_out);
+        err = profile_add(context, shifted_y1, y2, y_out, "inv_y1<<m+y2", digits, profiler);
     } else {
-        err = batch_mp_sub(context, shifted_y1, y2, y_out);
+        err = profile_sub(context, shifted_y1, y2, y_out, "inv_y1<<m-y2", digits, profiler);
     }
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
     }
-    err = y_out.compact(context);
+    err = profile_compact(context, y_out, "inv_y", digits, profiler);
     if (err != cudaSuccess) {
         arena_reset(arena, frame_mark);
         return err;
@@ -1293,36 +1351,36 @@ cudaError_t recursive_inverse(
             arena_reset(arena, frame_mark);
             return cudaErrorMemoryAllocation;
         }
-        err = batch_mp_mul(context, y2, x, y2_x);
+        err = profile_mul(context, y2, x, y2_x, "inv_y2*x", digits, profiler);
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
         }
-        err = y2_x.compact(context);
+        err = profile_compact(context, y2_x, "inv_y2*x", digits, profiler);
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
         }
-        err = batch_mp_shift_bits(context, res2, shifted_res2, (int32_t)m);
+        err = profile_shift_bits(context, res2, shifted_res2, (int32_t)m, "inv_res2<<m", digits, profiler);
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
         }
-        err = shifted_res2.compact(context);
+        err = profile_compact(context, shifted_res2, "inv_res2<<m", digits, profiler);
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
         }
         if (positive_branch) {
-            err = batch_mp_sub(context, shifted_res2, y2_x, *res_out);
+            err = profile_sub(context, shifted_res2, y2_x, *res_out, "inv_res2<<m-y2*x", digits, profiler);
         } else {
-            err = batch_mp_sub(context, y2_x, shifted_res2, *res_out);
+            err = profile_sub(context, y2_x, shifted_res2, *res_out, "inv_y2*x-res2<<m", digits, profiler);
         }
         if (err != cudaSuccess) {
             arena_reset(arena, frame_mark);
             return err;
         }
-        err = res_out->compact(context);
+        err = profile_compact(context, *res_out, "inv_res", digits, profiler);
         arena_reset(arena, frame_mark);
         return err;
     }
@@ -1573,7 +1631,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     if (R_shifted.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
-    err = batch_mp_shift_bits(context, R_preshift, R_shifted, -r_total_shift_bits);
+    err = profile_shift_bits(context, R_preshift, R_shifted, -r_total_shift_bits, "R_shift", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
     batch_mp_array_release(R_bs);
     R_bs = {};
@@ -1639,9 +1697,9 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         .storage = inverse_workspace,
         .next_limb = 0u
     };
-    err = recursive_inverse(context, Q_truncated_final, inverse_bits, true, inv_q_final, nullptr, &arena);
+    err = recursive_inverse(context, Q_truncated_final, inverse_bits, true, inv_q_final, nullptr, &arena, (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
-    err = inv_q_final.compact(context);
+    err = profile_compact(context, inv_q_final, "inv_q", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     release_array(&Q_final);
@@ -1650,9 +1708,9 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     if (ret_product.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
-    err = batch_mp_mul(context, P_truncated_final, inv_q_final, ret_product);
+    err = profile_mul(context, P_truncated_final, inv_q_final, ret_product, "P*invQ", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
-    err = ret_product.compact(context);
+    err = profile_compact(context, ret_product, "P*invQ", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     release_array(&P_final);
@@ -1665,9 +1723,9 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     }
 
     const uint64_t final_shift = inverse_bits - (uint64_t)prec_limbs * 32u;
-    err = shift_right_large(context, ret_product, final_shift, ret_final);
+    err = shift_right_large(context, ret_product, final_shift, ret_final, "RET_shift", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
-    err = ret_final.compact(context);
+    err = profile_compact(context, ret_final, "RET", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
     release_array(&ret_product);
 
