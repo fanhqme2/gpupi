@@ -1717,7 +1717,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     release_array(&inverse_workspace);
     release_array(&inv_q_final);
 
-    ret_final = batch_mp_array_create(1u, ret_product.length);
+    ret_final = batch_mp_array_create(1u, ret_product.length - (inverse_bits / 32u) + prec_limbs);
     if (ret_final.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
