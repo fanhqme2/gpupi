@@ -103,7 +103,7 @@ def truncate_limbs_quotient(p, q, prec_limbs):
         q >>= extra_limbs * 32
     return p, q
 
-def recursive_inverse(x, L, is_initial = False):
+def recursive_inverse_old(x, L, is_initial = False):
     if L <= 256:
         total = mpz(1) << L
         y = total // x
@@ -115,7 +115,7 @@ def recursive_inverse(x, L, is_initial = False):
     x1 = x >> m
     x2 = x & ((mpz(1) << m) - 1)
 
-    y1, res1 = recursive_inverse(x1, L - m * 2)
+    y1, res1 = recursive_inverse_old(x1, L - m * 2)
     x2y1 = x2 * y1
     res1_m = res1 << m
     if res1_m >= x2y1:
@@ -141,6 +141,38 @@ def recursive_inverse(x, L, is_initial = False):
     #     y2 += 1
     return y1y2, res2
 
+def recursive_inverse(x, L):
+    Ls = [L]
+    while Ls[-1] > 256:
+        m = (Ls[-1] - 2) // 4
+        m -= m & 31
+        Ls.append(Ls[-1] - m * 2)
+    def get_chunk(x, l): # Can be implemented as slicing as ((L - l) // 2) is always multiple of 32
+        return x >> ((L - l) // 2)
+    L0 = Ls[-1]
+    total = mpz(1) << L0
+    y, res = gmpy2.f_divmod(total, get_chunk(x, L0))
+
+    for L1, L2 in zip(reversed(Ls), reversed(Ls[:-1])):
+        # go from L1 to L2
+        m = (L2 - L1) // 2
+        x2 = get_chunk(x, L2) & ((mpz(1) << m) - 1)  # Can be implemented as slicing as m is multiple of 32
+        x2y1 = x2 * y
+        res1_m = res << m
+        if res1_m >= x2y1:
+            res2 = res1_m - x2y1
+            y2 = (res2 * y) >> (L2 - m * 2)
+            if L2 != L:
+                res = (res2 << m) - y2 * get_chunk(x, L2)
+            y = (y << m) + y2
+        else:
+            res2 = x2y1 - res1_m
+            y2 = ((res2 * y) >> (L2 - m * 2)) + 1
+            if L2 != L:
+                res = y2 * get_chunk(x, L2) - (res2 << m)
+            y = (y << m) - y2
+    
+    return y
 
 
 def main():
@@ -178,7 +210,7 @@ def main():
     p_final, q_final = truncate_limbs_quotient(p_final, q_final, prec_limbs)
     
     q_bits_count = q_final.bit_length()
-    inv_q_final = recursive_inverse(q_final, q_bits_count * 2 - 1, is_initial = True)
+    inv_q_final = recursive_inverse(q_final, q_bits_count * 2 - 1)
 
     ret_final = (p_final * inv_q_final) >> (q_bits_count * 2 - 1 - prec_limbs * 32)
 
