@@ -11,6 +11,7 @@
 #include <gmp.h>
 
 #include "batch_arith.h"
+#include "convert_decimal.h"
 #include "batch_mul_naive.h"
 
 /*
@@ -172,6 +173,7 @@ constexpr uint32_t kBlockCommonDivisorLo = 830297u;
 constexpr uint32_t kBlockCommonDivisorHi = 156590819u;
 constexpr uint32_t kValidationMod = 1000000007u;
 constexpr uint64_t kLimbBaseMod = (1ull << 32) % kValidationMod;
+constexpr uint32_t kDecimalLeafDigits = 477u;
 
 cudaError_t append_stage_profile(
     StageProfiler * profiler,
@@ -829,6 +831,14 @@ uint32_t compute_mod_hash(const uint32_t * limbs, uint32_t length) {
     return (uint32_t)value;
 }
 
+uint32_t compute_decimal_hash(const char * digits, uint32_t length) {
+    uint64_t value = 3u;
+    for (uint32_t i = 0; i < length; ++i) {
+        value = (value * 10u + (uint32_t)(digits[i] - '0')) % kValidationMod;
+    }
+    return (uint32_t)value;
+}
+
 void print_hex_preview_with_hash(const char * label, const uint32_t * limbs, uint32_t length) {
     const uint32_t hash = compute_mod_hash(limbs, length);
     if (length == 0) {
@@ -883,6 +893,25 @@ bool print_fractional_preview_summary(const BatchMPArray &ret) {
     print_hex_preview_with_hash("RET", ret_host, ret.length);
     delete [] ret_host;
     return true;
+}
+
+uint32_t round_up_decimal_digits(uint32_t requested_digits) {
+    if (requested_digits == 0u) {
+        return 0u;
+    }
+    uint32_t digits = kDecimalLeafDigits;
+    while (digits < requested_digits) {
+        if (digits > UINT32_MAX / 2u) {
+            return 0u;
+        }
+        digits <<= 1u;
+    }
+    return digits;
+}
+
+uint32_t compute_prec_limbs_for_digits(uint32_t digits) {
+    const uint32_t prec_bits = (uint32_t)((double)digits * 3.322) + 31u;
+    return prec_bits / 32u + 1u;
 }
 
 uint32_t limb_bit_length(uint32_t limb) {
@@ -2018,6 +2047,13 @@ int main_fractional(int argc, char ** argv){
         fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
         return 1;
     }
+    const uint32_t requested_digits = (uint32_t)target_digits;
+    const uint32_t compute_digits = round_up_decimal_digits(requested_digits);
+    const uint32_t prec_limbs = compute_prec_limbs_for_digits(compute_digits);
+    if (requested_digits > 0u && compute_digits == 0u) {
+        fprintf(stderr, "Unsupported target_digits=%d\n", target_digits);
+        return 1;
+    }
     bool benchmark_only = false;
     bool profile_stages = false;
     bool print_result = true;
@@ -2044,6 +2080,8 @@ int main_fractional(int argc, char ** argv){
     BatchMPArray Q{};
     BatchMPArray P_base{};
     BatchMPArray Q_base{};
+    ConvertDecimalPowerTable decimal_powers{};
+    char * d_decimal_digits = nullptr;
     StageProfiler profiler{};
     cudaEvent_t start_event = nullptr;
     cudaEvent_t stop_event = nullptr;
@@ -2055,12 +2093,63 @@ int main_fractional(int argc, char ** argv){
         return 1;
     }
 
+    auto release_decimal = [&]() {
+        if (d_decimal_digits != nullptr) {
+            cudaFree(d_decimal_digits);
+            d_decimal_digits = nullptr;
+        }
+        convert_decimal_release_powers(&decimal_powers);
+    };
+
+    const uint32_t decimal_levels = (compute_digits == 0u)
+        ? 0u
+        : (uint32_t)__builtin_ctz(compute_digits / kDecimalLeafDigits);
+
     if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
-        !check_cuda(pi_fractional(context, target_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
-        !check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)") ||
+        !check_cuda(pi_fractional(context, (int)compute_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
+        !check_cuda(convert_decimal_precompute_powers(context, &decimal_powers, kDecimalLeafDigits, decimal_levels), "convert_decimal_precompute_powers")) {
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
+        release_decimal();
+        release_array(&P_base);
+        release_array(&Q_base);
+        batch_mp_destroy(context);
+        return 1;
+    }
+    if (requested_digits > 0u) {
+        if (!check_cuda(cudaMalloc(&d_decimal_digits, compute_digits), "cudaMalloc(decimal_digits)")) {
+            cudaEventDestroy(start_event);
+            cudaEventDestroy(stop_event);
+            release_decimal();
+            release_array(&P_base);
+            release_array(&Q_base);
+            batch_mp_destroy(context);
+            return 1;
+        }
+        BatchMPArray fractional_bits = make_subview(P, 0u, std::min<uint32_t>(prec_limbs, P.length));
+        if (!check_cuda(convert_decimal_equal_split(
+                context,
+                fractional_bits,
+                prec_limbs * 32u,
+                compute_digits,
+                kDecimalLeafDigits,
+                &decimal_powers,
+                d_decimal_digits
+            ), "convert_decimal_equal_split")) {
+            cudaEventDestroy(start_event);
+            cudaEventDestroy(stop_event);
+            release_decimal();
+            release_array(&P_base);
+            release_array(&Q_base);
+            batch_mp_destroy(context);
+            return 1;
+        }
+    }
+    if (!check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)") ||
         !check_cuda(cudaEventSynchronize(stop_event), "cudaEventSynchronize(stop)")) {
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
+        release_decimal();
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
@@ -2071,6 +2160,7 @@ int main_fractional(int argc, char ** argv){
     if (!check_cuda(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime")) {
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
+        release_decimal();
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
@@ -2081,6 +2171,7 @@ int main_fractional(int argc, char ** argv){
 
     if (P.batch_size != 1) {
         fprintf(stderr, "Unexpected output batch size: RET=%u\n", P.batch_size);
+        release_decimal();
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
@@ -2089,18 +2180,39 @@ int main_fractional(int argc, char ** argv){
 
     if (benchmark_only) {
         printf(
-            "target_digits=%d RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
-            target_digits,
+            "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            requested_digits,
+            compute_digits,
             P.length,
             elapsed_ms,
             (int)(batch_mp_workspace_size(context) / (1024 * 1024))
         );
         if (!print_fractional_preview_summary(P)) {
+            release_decimal();
             release_array(&P_base);
             release_array(&Q_base);
             batch_mp_destroy(context);
             return 1;
         }
+        if (requested_digits > 0u) {
+            const uint32_t prefix_frac = std::min<uint32_t>(requested_digits, 63u);
+            const uint32_t suffix_frac = std::min<uint32_t>(requested_digits, 64u);
+            char prefix[65] = {};
+            char suffix[65] = {};
+            prefix[0] = '3';
+            if (!check_cuda(cudaMemcpy(prefix + 1, d_decimal_digits, prefix_frac, cudaMemcpyDeviceToHost), "cudaMemcpy(decimal_prefix)") ||
+                !check_cuda(cudaMemcpy(suffix, d_decimal_digits + (requested_digits - suffix_frac), suffix_frac, cudaMemcpyDeviceToHost), "cudaMemcpy(decimal_suffix)")) {
+                release_decimal();
+                release_array(&P_base);
+                release_array(&Q_base);
+                batch_mp_destroy(context);
+                return 1;
+            }
+            printf("DEC = %s...%.*s\n", prefix, (int)suffix_frac, suffix);
+        } else {
+            printf("DEC = 3\n");
+        }
+        release_decimal();
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
@@ -2166,19 +2278,34 @@ int main_fractional(int argc, char ** argv){
         );
         const float accounted_ms = total_leaf_ms + total_mul_ms + total_mul_small_ms + total_shift_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
         printf(
-            "target_digits=%d RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
-            target_digits,
+            "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            requested_digits,
+            compute_digits,
             P.length,
             elapsed_ms,
             accounted_ms,
             (int)(batch_mp_workspace_size(context) / (1024 * 1024))
         );
         if (!print_fractional_preview_summary(P)) {
+            release_decimal();
             release_array(&P_base);
             release_array(&Q_base);
             batch_mp_destroy(context);
             return 1;
         }
+        if (requested_digits > 0u) {
+            const uint32_t copy_digits = std::min<uint32_t>(requested_digits, 4096u);
+            std::vector<char> decimal_preview(copy_digits);
+            if (!check_cuda(cudaMemcpy(decimal_preview.data(), d_decimal_digits, copy_digits, cudaMemcpyDeviceToHost), "cudaMemcpy(decimal_preview)")) {
+                release_decimal();
+                release_array(&P_base);
+                release_array(&Q_base);
+                batch_mp_destroy(context);
+                return 1;
+            }
+            printf("DEC_preview_hash = %u\n", compute_decimal_hash(decimal_preview.data(), copy_digits));
+        }
+        release_decimal();
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
@@ -2186,18 +2313,43 @@ int main_fractional(int argc, char ** argv){
     }
 
     printf(
-        "target_digits=%d RET_len=%u elapsed_ms=%.3f\n",
-        target_digits,
+        "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f\n",
+        requested_digits,
+        compute_digits,
         P.length,
         elapsed_ms
     );
     if (print_result && !print_full_hex_value("RET", P)) {
+        release_decimal();
         release_array(&P_base);
         release_array(&Q_base);
         batch_mp_destroy(context);
         return 1;
     }
+    if (print_result) {
+        if (requested_digits == 0u) {
+            printf("DEC = 3\n");
+        } else {
+            std::vector<char> decimal_digits(requested_digits);
+            if (!check_cuda(cudaMemcpy(
+                    decimal_digits.data(),
+                    d_decimal_digits,
+                    requested_digits,
+                    cudaMemcpyDeviceToHost
+                ), "cudaMemcpy(decimal_digits)")) {
+                release_decimal();
+                release_array(&P_base);
+                release_array(&Q_base);
+                batch_mp_destroy(context);
+                return 1;
+            }
+            printf("DEC = 3");
+            fwrite(decimal_digits.data(), 1, requested_digits, stdout);
+            printf("\n");
+        }
+    }
 
+    release_decimal();
     release_array(&P_base);
     release_array(&Q_base);
     batch_mp_destroy(context);

@@ -23,6 +23,10 @@ LIB_SRCS := \
 	batch_bitlength.cu \
 	batch_shift.cu
 
+LIB_SRCS += \
+	convert_decimal.cu \
+	batch_decimal_naive.cu
+
 SRCS := $(MAIN_SRC) $(LIB_SRCS)
 OBJS := $(patsubst %.cu,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)

@@ -174,6 +174,14 @@ def recursive_inverse(x, L):
     
     return y
 
+def round_up_decimal_digits(target_digits):
+    if target_digits <= 0:
+        return 0
+    digits = 477
+    while digits < target_digits:
+        digits *= 2
+    return digits
+
 
 def main():
     target_digits = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
@@ -185,23 +193,29 @@ def main():
         capture_output=True,
         text=True,
     )
-    match = re.search(r"^RET = ([0-9a-fA-F]+)$", proc.stdout, re.MULTILINE)
-    if match is None:
+    info_match = re.search(r"^target_digits=(\d+) compute_digits=(\d+) RET_len=(\d+) elapsed_ms=", proc.stdout, re.MULTILINE)
+    ret_match = re.search(r"^RET = ([0-9a-fA-F]+)$", proc.stdout, re.MULTILINE)
+    dec_match = re.search(r"^DEC = ([0-9]+)$", proc.stdout, re.MULTILINE)
+    if info_match is None or ret_match is None or dec_match is None:
         sys.stderr.write(proc.stdout)
         sys.stderr.write(proc.stderr)
-        raise RuntimeError("failed to parse RET from pi_bs_gpu output")
-    gpu_ret = mpz(match.group(1), 16)
+        raise RuntimeError("failed to parse RET/DEC from pi_bs_gpu output")
+    gpu_compute_digits = int(info_match.group(2))
+    gpu_ret = mpz(ret_match.group(1), 16)
+    gpu_dec = dec_match.group(1)
 
-    
-    prec_limbs = (int(target_digits * 3.322) + 31) // 32 + 1
+    compute_digits = round_up_decimal_digits(target_digits)
+    assert gpu_compute_digits == compute_digits
+
+    prec_limbs = (int(compute_digits * 3.322) + 31) // 32 + 1
     n = 1
-    while n * 17 * 14.3 < target_digits:
+    while n * 17 * 14.3 < compute_digits:
         n *= 2
 
     q, r = binary_split(0, n * 17, True)
     r >>= 15 * (n * 17) - 8
 
-    p_15, q_15 = sqrt_10005(target_digits)
+    p_15, q_15 = sqrt_10005(compute_digits)
     q, r = truncate_limbs_quotient(q, r, prec_limbs)
 
     p_final = p_15 * q
@@ -215,6 +229,8 @@ def main():
     ret_final = (p_final * inv_q_final) >> (q_bits_count * 2 - 1 - prec_limbs * 32)
 
     assert gpu_ret == ret_final
+    expected_dec = str((ret_final * mpz(10) ** compute_digits) >> (prec_limbs * 32))
+    assert gpu_dec == expected_dec[:target_digits + 1]
     print(f"matched digits={target_digits}")
 
     # #verifying the results with the known value of pi
