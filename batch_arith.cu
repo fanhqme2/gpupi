@@ -90,7 +90,13 @@ bool valid_array(BatchMPArray array) {
     if (array.batch_size == 0) {
         return array.length <= array.stride;
     }
-    return array.data != nullptr && array.length <= array.stride;
+    if (array.data == nullptr) {
+        return false;
+    }
+    if (array.stride == 0u) {
+        return true;
+    }
+    return array.length <= array.stride;
 }
 
 bool same_batch(BatchMPArray a, BatchMPArray b) {

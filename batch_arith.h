@@ -18,6 +18,8 @@ struct BatchMPArray {
 
 // Allocate device storage for batch_size values with the given stride.
 // If stride is zero, length is used as the stride.
+// A manually constructed BatchMPArray may also use stride == 0 to broadcast a
+// single shared row across all batch items.
 // On failure, the returned array has data == nullptr.
 BatchMPArray batch_mp_array_create(
     uint32_t batch_size,
