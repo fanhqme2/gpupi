@@ -14,27 +14,6 @@
 #include "convert_decimal.h"
 #include "batch_mul_naive.h"
 
-/*
-How to make this file:
-
-make pi_bs_gpu
-
-How to check correctness:
-
-Quick check of correctness:
-python3 check_fractional.py 10000
-
-Further check of correctness:
-python3 check_fractional.py 1000000
-
-Final benchmark and check:
-./pi_bs_gpu 1000000000 --benchmark
-it should have
-RET = 3243f6a88...9218acb27b5a248c hash = 987023668
-and the elapsed_ms is what we care about
-
-*/
-
 __device__ __forceinline__ void reduce_gcd_quotient(uint32_t &a, uint32_t &b){
     if (a % 3 == 0 && b % 3 == 0){
         a /= 3;
