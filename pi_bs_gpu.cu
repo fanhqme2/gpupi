@@ -2044,7 +2044,7 @@ int main_sqrt_10005(int argc, char ** argv){
 int main_fractional(int argc, char ** argv){
     int target_digits = 0;
     if (argc < 2 || !parse_int_arg(argv[1], &target_digits) || target_digits < 0) {
-        fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages|--full-print]\n", argv[0]);
         return 1;
     }
     const uint32_t requested_digits = (uint32_t)target_digits;
@@ -2056,16 +2056,16 @@ int main_fractional(int argc, char ** argv){
     }
     bool benchmark_only = false;
     bool profile_stages = false;
-    bool print_result = true;
+    bool full_print = false;
     if (argc >= 3) {
         if (strcmp(argv[2], "--benchmark") == 0) {
             benchmark_only = true;
-            print_result = false;
         } else if (strcmp(argv[2], "--profile-stages") == 0) {
             profile_stages = true;
-            print_result = false;
+        } else if (strcmp(argv[2], "--full-print") == 0) {
+            full_print = true;
         } else {
-            fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
+            fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages|--full-print]\n", argv[0]);
             return 1;
         }
     }
@@ -2312,21 +2312,22 @@ int main_fractional(int argc, char ** argv){
         return 0;
     }
 
-    printf(
+    fprintf(
+        stderr,
         "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f\n",
         requested_digits,
         compute_digits,
         P.length,
         elapsed_ms
     );
-    if (print_result && !print_full_hex_value("RET", P)) {
-        release_decimal();
-        release_array(&P_base);
-        release_array(&Q_base);
-        batch_mp_destroy(context);
-        return 1;
-    }
-    if (print_result) {
+    if (full_print) {
+        if (!print_full_hex_value("RET", P)) {
+            release_decimal();
+            release_array(&P_base);
+            release_array(&Q_base);
+            batch_mp_destroy(context);
+            return 1;
+        }
         if (requested_digits == 0u) {
             printf("DEC = 3\n");
         } else {
@@ -2347,7 +2348,26 @@ int main_fractional(int argc, char ** argv){
             fwrite(decimal_digits.data(), 1, requested_digits, stdout);
             printf("\n");
         }
+    } else {
+        fputc('3', stdout);
+        if (requested_digits > 0u) {
+            std::vector<char> decimal_digits(requested_digits);
+            if (!check_cuda(cudaMemcpy(
+                    decimal_digits.data(),
+                    d_decimal_digits,
+                    requested_digits,
+                    cudaMemcpyDeviceToHost
+                ), "cudaMemcpy(decimal_digits)")) {
+                release_decimal();
+                release_array(&P_base);
+                release_array(&Q_base);
+                batch_mp_destroy(context);
+                return 1;
+            }
+            fwrite(decimal_digits.data(), 1, requested_digits, stdout);
+        }
     }
+    fputc('\n', stdout);
 
     release_decimal();
     release_array(&P_base);

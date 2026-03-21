@@ -188,12 +188,12 @@ def main():
 
     
     proc = subprocess.run(
-        ["./pi_bs_gpu", str(target_digits)],
+        ["./pi_bs_gpu", str(target_digits), "--full-print"],
         check=True,
         capture_output=True,
         text=True,
     )
-    info_match = re.search(r"^target_digits=(\d+) compute_digits=(\d+) RET_len=(\d+) elapsed_ms=", proc.stdout, re.MULTILINE)
+    info_match = re.search(r"^target_digits=(\d+) compute_digits=(\d+) RET_len=(\d+) elapsed_ms=", proc.stderr, re.MULTILINE)
     ret_match = re.search(r"^RET = ([0-9a-fA-F]+)$", proc.stdout, re.MULTILINE)
     dec_match = re.search(r"^DEC = ([0-9]+)$", proc.stdout, re.MULTILINE)
     if info_match is None or ret_match is None or dec_match is None:
