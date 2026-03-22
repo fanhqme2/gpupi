@@ -441,6 +441,53 @@ cudaError_t profile_shift_bits(
     );
 }
 
+cudaError_t profile_decimal_precompute_powers(
+    BatchMPContext * context,
+    ConvertDecimalPowerTable * table,
+    uint32_t leaf_digits,
+    uint32_t levels,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "decimal_powers",
+        "precompute_5pow",
+        levels == 0u ? leaf_digits : (leaf_digits << levels),
+        1u,
+        levels,
+        leaf_digits,
+        false,
+        profiler,
+        [&]() { return convert_decimal_precompute_powers(context, table, leaf_digits, levels); }
+    );
+}
+
+cudaError_t profile_decimal_convert(
+    BatchMPContext * context,
+    BatchMPArray input,
+    uint32_t input_bits,
+    uint32_t total_digits,
+    uint32_t leaf_digits,
+    const ConvertDecimalPowerTable * table,
+    char * output_digits,
+    StageProfiler * profiler
+) {
+    return profile_stage(
+        "decimal_convert",
+        "equal_split",
+        total_digits,
+        input.batch_size,
+        input.length,
+        leaf_digits,
+        false,
+        profiler,
+        [&]() {
+            return convert_decimal_equal_split(
+                context, input, input_bits, total_digits, leaf_digits, table, output_digits
+            );
+        }
+    );
+}
+
 }  // namespace
 
 #define CHECK_AND_RETURN(err, cleanup) \
@@ -2089,7 +2136,13 @@ int main_fractional(int argc, char ** argv){
 
     if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
         !check_cuda(pi_fractional(context, (int)requested_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
-        !check_cuda(convert_decimal_precompute_powers(context, &decimal_powers, kDecimalLeafDigits, decimal_levels), "convert_decimal_precompute_powers")) {
+        !check_cuda(profile_decimal_precompute_powers(
+                context,
+                &decimal_powers,
+                kDecimalLeafDigits,
+                decimal_levels,
+                profile_stages ? &profiler : nullptr
+            ), "convert_decimal_precompute_powers")) {
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
         release_decimal();
@@ -2109,14 +2162,15 @@ int main_fractional(int argc, char ** argv){
             return 1;
         }
         BatchMPArray fractional_bits = make_subview(P, 0u, std::min<uint32_t>(prec_limbs, P.length));
-        if (!check_cuda(convert_decimal_equal_split(
+        if (!check_cuda(profile_decimal_convert(
                 context,
                 fractional_bits,
                 prec_limbs * 32u,
                 convert_digits,
                 kDecimalLeafDigits,
                 &decimal_powers,
-                d_decimal_digits
+                d_decimal_digits,
+                profile_stages ? &profiler : nullptr
             ), "convert_decimal_equal_split")) {
             cudaEventDestroy(start_event);
             cudaEventDestroy(stop_event);
@@ -2210,6 +2264,8 @@ int main_fractional(int argc, char ** argv){
         float total_sub_ms = 0.0f;
         float total_compact_ms = 0.0f;
         float total_exactdiv_ms = 0.0f;
+        float total_decimal_powers_ms = 0.0f;
+        float total_decimal_convert_ms = 0.0f;
         float total_ntt_ms = 0.0f;
         for (int idx = 0; idx < profiler.count; ++idx) {
             const StageProfileEntry & entry = profiler.entries[idx];
@@ -2232,6 +2288,10 @@ int main_fractional(int argc, char ** argv){
                 total_compact_ms += entry.elapsed_ms;
             } else if (strcmp(entry.kind, "exactdiv") == 0) {
                 total_exactdiv_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "decimal_powers") == 0) {
+                total_decimal_powers_ms += entry.elapsed_ms;
+            } else if (strcmp(entry.kind, "decimal_convert") == 0) {
+                total_decimal_convert_ms += entry.elapsed_ms;
             }
             printf(
                 "stage[%03d] kind=%9s label=%18s digits=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
@@ -2247,7 +2307,7 @@ int main_fractional(int argc, char ** argv){
             );
         }
         printf(
-            "leaf_total_ms=%.3f mul_total_ms=%.3f mul_small_total_ms=%.3f shift_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f exactdiv_total_ms=%.3f ntt_total_ms=%.3f\n",
+            "leaf_total_ms=%.3f mul_total_ms=%.3f mul_small_total_ms=%.3f shift_total_ms=%.3f add_total_ms=%.3f sub_total_ms=%.3f compact_total_ms=%.3f exactdiv_total_ms=%.3f decimal_powers_total_ms=%.3f decimal_convert_total_ms=%.3f ntt_total_ms=%.3f\n",
             total_leaf_ms,
             total_mul_ms,
             total_mul_small_ms,
@@ -2256,9 +2316,21 @@ int main_fractional(int argc, char ** argv){
             total_sub_ms,
             total_compact_ms,
             total_exactdiv_ms,
+            total_decimal_powers_ms,
+            total_decimal_convert_ms,
             total_ntt_ms
         );
-        const float accounted_ms = total_leaf_ms + total_mul_ms + total_mul_small_ms + total_shift_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
+        const float accounted_ms =
+            total_leaf_ms +
+            total_mul_ms +
+            total_mul_small_ms +
+            total_shift_ms +
+            total_add_ms +
+            total_sub_ms +
+            total_compact_ms +
+            total_exactdiv_ms +
+            total_decimal_powers_ms +
+            total_decimal_convert_ms;
         printf(
             "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
             requested_digits,
