@@ -12,6 +12,8 @@ With RTX 5090, it breaks several records as listed in https://www.numberworld.or
 
 ## Build
 
+This repo needs CUDA 13
+
 Compile the main binary:
 
 ```bash
