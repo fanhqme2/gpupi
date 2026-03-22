@@ -152,7 +152,7 @@ constexpr uint32_t kBlockCommonDivisorLo = 830297u;
 constexpr uint32_t kBlockCommonDivisorHi = 156590819u;
 constexpr uint32_t kValidationMod = 1000000007u;
 constexpr uint64_t kLimbBaseMod = (1ull << 32) % kValidationMod;
-constexpr uint32_t kDecimalLeafDigits = 477u;
+uint32_t kDecimalLeafDigits = 477u;
 
 cudaError_t append_stage_profile(
     StageProfiler * profiler,
@@ -878,14 +878,17 @@ uint32_t round_up_decimal_digits(uint32_t requested_digits) {
     if (requested_digits == 0u) {
         return 0u;
     }
-    uint32_t digits = kDecimalLeafDigits;
-    while (digits < requested_digits) {
-        if (digits > UINT32_MAX / 2u) {
-            return 0u;
-        }
-        digits <<= 1u;
+    uint32_t digits = requested_digits;
+    uint32_t levels = 0;
+    while (digits >= 32 * 18){
+        digits = digits >> 1;
+        levels ++;
     }
-    return digits;
+    if ((digits << levels) < requested_digits) {
+        digits ++;
+    }
+    kDecimalLeafDigits = digits;
+    return digits << levels;
 }
 
 uint32_t compute_prec_limbs_for_digits(uint32_t digits) {
@@ -2027,9 +2030,9 @@ int main_fractional(int argc, char ** argv){
         return 1;
     }
     const uint32_t requested_digits = (uint32_t)target_digits;
-    const uint32_t compute_digits = round_up_decimal_digits(requested_digits);
-    const uint32_t prec_limbs = compute_prec_limbs_for_digits(compute_digits);
-    if (requested_digits > 0u && compute_digits == 0u) {
+    const uint32_t convert_digits = round_up_decimal_digits(requested_digits);
+    const uint32_t prec_limbs = compute_prec_limbs_for_digits(requested_digits);
+    if (requested_digits > 0u && convert_digits == 0u) {
         fprintf(stderr, "Unsupported target_digits=%d\n", target_digits);
         return 1;
     }
@@ -2080,12 +2083,12 @@ int main_fractional(int argc, char ** argv){
         convert_decimal_release_powers(&decimal_powers);
     };
 
-    const uint32_t decimal_levels = (compute_digits == 0u)
+    const uint32_t decimal_levels = (convert_digits == 0u)
         ? 0u
-        : (uint32_t)__builtin_ctz(compute_digits / kDecimalLeafDigits);
+        : (uint32_t)__builtin_ctz(convert_digits / kDecimalLeafDigits);
 
     if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
-        !check_cuda(pi_fractional(context, (int)compute_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
+        !check_cuda(pi_fractional(context, (int)requested_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
         !check_cuda(convert_decimal_precompute_powers(context, &decimal_powers, kDecimalLeafDigits, decimal_levels), "convert_decimal_precompute_powers")) {
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
@@ -2096,7 +2099,7 @@ int main_fractional(int argc, char ** argv){
         return 1;
     }
     if (requested_digits > 0u) {
-        if (!check_cuda(cudaMalloc(&d_decimal_digits, compute_digits), "cudaMalloc(decimal_digits)")) {
+        if (!check_cuda(cudaMalloc(&d_decimal_digits, convert_digits), "cudaMalloc(decimal_digits)")) {
             cudaEventDestroy(start_event);
             cudaEventDestroy(stop_event);
             release_decimal();
@@ -2110,7 +2113,7 @@ int main_fractional(int argc, char ** argv){
                 context,
                 fractional_bits,
                 prec_limbs * 32u,
-                compute_digits,
+                convert_digits,
                 kDecimalLeafDigits,
                 &decimal_powers,
                 d_decimal_digits
@@ -2159,9 +2162,9 @@ int main_fractional(int argc, char ** argv){
 
     if (benchmark_only) {
         printf(
-            "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
             requested_digits,
-            compute_digits,
+            convert_digits,
             P.length,
             elapsed_ms,
             (int)(batch_mp_workspace_size(context) / (1024 * 1024))
@@ -2257,9 +2260,9 @@ int main_fractional(int argc, char ** argv){
         );
         const float accounted_ms = total_leaf_ms + total_mul_ms + total_mul_small_ms + total_shift_ms + total_add_ms + total_sub_ms + total_compact_ms + total_exactdiv_ms;
         printf(
-            "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
             requested_digits,
-            compute_digits,
+            convert_digits,
             P.length,
             elapsed_ms,
             accounted_ms,
@@ -2293,9 +2296,9 @@ int main_fractional(int argc, char ** argv){
 
     fprintf(
         stderr,
-        "target_digits=%u compute_digits=%u RET_len=%u elapsed_ms=%.3f\n",
+        "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f\n",
         requested_digits,
-        compute_digits,
+        convert_digits,
         P.length,
         elapsed_ms
     );
