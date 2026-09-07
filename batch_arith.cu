@@ -179,7 +179,7 @@ cudaError_t batch_mp_mul(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, Ba
     }
 
     const size_t L = (size_t)A.length + (size_t)B.length;
-    if (L <= BATCH_MUL_NAIVE_L_MAX) {
+    if (L <= BATCH_MP_MUL_NAIVE_CUTOFF) {
         batch_mul_naive(
             A.data, B.data, C.data,
             (int)A.batch_size, (int)A.length, (int)B.length,

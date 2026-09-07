@@ -17,9 +17,10 @@ constexpr uint32_t kPrecisionMarginBits = 34u;
 
 struct ArrayOwner {
     BatchMPArray array{};
+    bool owns = true;
 
     ~ArrayOwner() {
-        batch_mp_array_release(array);
+        if (owns) batch_mp_array_release(array);
     }
 
     BatchMPArray release() {
@@ -311,6 +312,31 @@ cudaError_t convert_decimal_equal_split(
         limbs_per_level[level] = ceil_div_u32(bits_per_level[level], 32u);
     }
 
+    // Each level has the same roles with different row shapes. Reserve their
+    // maximum sizes once and alternate the two child buffers across levels.
+    ArrayOwner arena{};
+    size_t next_words = 0u, mantissa_words = 0u, product_words = 0u;
+    if (levels != 0u) {
+        for (uint32_t level = 0u; level < levels; ++level) {
+            const size_t rows = (size_t)1u << level;
+            if (bits_per_level[level] <= digits_per_level[level + 1u] ||
+                bits_per_level[level] < bits_per_level[level + 1u]) {
+                return cudaErrorInvalidValue;
+            }
+            const uint32_t mantissa_limbs = ceil_div_u32(
+                bits_per_level[level] - digits_per_level[level + 1u], 32u);
+            next_words = std::max(next_words, rows * 2u * limbs_per_level[level + 1u]);
+            mantissa_words = std::max(mantissa_words, rows * mantissa_limbs);
+            product_words = std::max(product_words,
+                rows * (mantissa_limbs + table->powers[levels - 1u - level].length));
+        }
+        mantissa_words = std::max(mantissa_words,
+            ((size_t)1u << levels) * limbs_per_level[levels]);
+        cudaError_t err = cudaMalloc(&arena.array.data,
+            (next_words * 2u + mantissa_words + product_words) * sizeof(uint32_t));
+        if (err != cudaSuccess) return err;
+    }
+
     BatchMPArray current = input;
     bool own_current = false;
 
@@ -332,11 +358,7 @@ cudaError_t convert_decimal_equal_split(
         if (truncated.array.data == nullptr) {
             return cudaErrorMemoryAllocation;
         }
-        cudaError_t err = cudaMemset(truncated.array.data, 0, (size_t)truncated.array.batch_size * truncated.array.stride * sizeof(uint32_t));
-        if (err != cudaSuccess) {
-            return err;
-        }
-        err = launch_extract_shifted_rows(
+        cudaError_t err = launch_extract_shifted_rows(
             input, truncated.array, 1u, input_bits - leaf_bits_needed, 0u
         );
         if (err != cudaSuccess) {
@@ -358,20 +380,14 @@ cudaError_t convert_decimal_equal_split(
                 return cudaErrorInvalidValue;
             }
 
-            ArrayOwner next{batch_mp_array_create(current.batch_size * 2u, limbs_per_level[level + 1u])};
+            ArrayOwner next{{arena.array.data + (level & 1u) * next_words,
+                limbs_per_level[level + 1u], current.batch_size * 2u,
+                limbs_per_level[level + 1u]}, false};
             if (next.array.data == nullptr) {
                 cleanup_current();
                 return cudaErrorMemoryAllocation;
             }
-            cudaError_t err = cudaMemset(
-                next.array.data, 0, (size_t)next.array.batch_size * next.array.stride * sizeof(uint32_t)
-            );
-            if (err != cudaSuccess) {
-                cleanup_current();
-                return err;
-            }
-
-            err = launch_extract_shifted_rows(
+            cudaError_t err = launch_extract_shifted_rows(
                 current, next.array, current.batch_size, bits_per_level[level] - child_bits, 0u
             );
             if (err != cudaSuccess) {
@@ -380,17 +396,12 @@ cudaError_t convert_decimal_equal_split(
             }
 
             const uint32_t mantissa_bits = bits_per_level[level] - half_digits;
-            ArrayOwner mantissa{batch_mp_array_create(current.batch_size, ceil_div_u32(mantissa_bits, 32u))};
+            const uint32_t mantissa_limbs = ceil_div_u32(mantissa_bits, 32u);
+            ArrayOwner mantissa{{arena.array.data + next_words * 2u,
+                mantissa_limbs, current.batch_size, mantissa_limbs}, false};
             if (mantissa.array.data == nullptr) {
                 cleanup_current();
                 return cudaErrorMemoryAllocation;
-            }
-            err = cudaMemset(
-                mantissa.array.data, 0, (size_t)mantissa.array.batch_size * mantissa.array.stride * sizeof(uint32_t)
-            );
-            if (err != cudaSuccess) {
-                cleanup_current();
-                return err;
             }
             err = launch_extract_low_bits_rows(current, mantissa.array, current.batch_size, mantissa_bits);
             if (err != cudaSuccess) {
@@ -404,9 +415,9 @@ cudaError_t convert_decimal_equal_split(
                 .batch_size = current.batch_size,
                 .stride = 0u
             };
-            ArrayOwner product{batch_mp_array_create(
-                current.batch_size, mantissa.array.length + power.length
-            )};
+            const uint32_t product_limbs = mantissa.array.length + power.length;
+            ArrayOwner product{{arena.array.data + next_words * 2u + mantissa_words,
+                product_limbs, current.batch_size, product_limbs}, false};
             if (product.array.data == nullptr) {
                 cleanup_current();
                 return cudaErrorMemoryAllocation;
@@ -427,11 +438,14 @@ cudaError_t convert_decimal_equal_split(
 
             cleanup_current();
             current = next.release();
-            own_current = true;
+            own_current = false;
         }
     }
 
-    ArrayOwner aligned{batch_mp_array_create(current.batch_size, current.length)};
+    ArrayOwner aligned{levels == 0u
+        ? batch_mp_array_create(current.batch_size, current.length)
+        : BatchMPArray{arena.array.data + next_words * 2u, current.length,
+            current.batch_size, current.length}, levels == 0u};
     if (aligned.array.data == nullptr) {
         cleanup_current();
         return cudaErrorMemoryAllocation;

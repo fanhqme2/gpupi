@@ -4,6 +4,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <cstring>
 
 #include <cuda_runtime.h>
 #include <curand.h>
@@ -283,16 +284,20 @@ static bool test_configuration(
     uint32_t L_b,
     NTTPrecomputedTables tables,
     std::mt19937_64& rng,
-    bool verbose = false
+    bool verbose = false,
+    bool square = false,
+    bool broadcast = false,
+    bool all_ones = false
 ) {
     const uint32_t L = L_a + L_b;
     std::bernoulli_distribution packed_dist(0.5);
     std::uniform_int_distribution<uint32_t> extra_stride_dist(1u, 8u);
     const uint32_t stride_A = packed_dist(rng) ? L_a : (L_a + extra_stride_dist(rng));
-    const uint32_t stride_B = packed_dist(rng) ? L_b : (L_b + extra_stride_dist(rng));
+    const uint32_t stride_B = square ? stride_A : (broadcast ? 0u :
+        (packed_dist(rng) ? L_b : (L_b + extra_stride_dist(rng))));
     const uint32_t stride_ret = packed_dist(rng) ? L : (L + extra_stride_dist(rng));
     const size_t size_A_words = (size_t)N * stride_A;
-    const size_t size_B_words = (size_t)N * stride_B;
+    const size_t size_B_words = broadcast ? L_b : (size_t)N * stride_B;
     const size_t size_ret_words = (size_t)N * stride_ret;
 
     if (verbose) {
@@ -309,6 +314,11 @@ static bool test_configuration(
         for (uint32_t j = 0; j < L_a; ++j) h_A[(size_t)i * stride_A + j] = word_dist(rng);
         for (uint32_t j = 0; j < L_b; ++j) h_B[(size_t)i * stride_B + j] = word_dist(rng);
     }
+    if (all_ones) {
+        std::fill(h_A.begin(), h_A.end(), 0xffffffffu);
+        std::fill(h_B.begin(), h_B.end(), 0xffffffffu);
+    }
+    if (square) h_B = h_A;
 
     uint32_t* d_A = nullptr;
     uint32_t* d_B = nullptr;
@@ -327,7 +337,8 @@ static bool test_configuration(
     CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), size_A_words * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), size_B_words * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-    batch_mul_ntt(d_A, d_B, d_ret, d_workspace, tables, N, L_a, L_b, stride_A, stride_B, stride_ret);
+    batch_mul_ntt(d_A, square ? d_A : d_B, d_ret, d_workspace, tables,
+        N, L_a, L_b, stride_A, stride_B, stride_ret);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -506,7 +517,8 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
     if (d_workspace) CUDA_CHECK(cudaFree(d_workspace));
 }
 
-int main() {
+int main(int argc, char **argv) {
+    const bool skip_benchmark = argc == 2 && std::strcmp(argv[1], "--skip-benchmark") == 0;
     std::mt19937_64 rng(100ull);
     bool all_passed = true;
     const uint64_t target_NL = 100000000ull; // keep N * L_a around 1e8
@@ -527,6 +539,18 @@ int main() {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     printf("=== Correctness Tests ===\n\n");
+
+    // Exercise small/medium transform schedules, identical operand pointers,
+    // broadcast rows, carry chains, and multiple workspace-sized batches.
+    for (uint32_t k = 13; k <= 24 && all_passed; ++k) {
+        const uint32_t limbs = (1u << (k - 1)) - 3u;
+        all_passed = test_configuration(3u, limbs, limbs, tables, rng, true, true);
+        all_passed = test_configuration(3u, limbs, limbs - 7u, tables, rng,
+            true, false, true, true) && all_passed;
+    }
+    all_passed = test_configuration(1025u, 4093u, 4093u, tables, rng,
+        true, true, false, true) && all_passed;
+    if (!all_passed) goto done;
 
     all_passed = run_suite("Small size tests (N*(L_a+L_b) <= 16384):", 16384, 12, false, tables, rng) && all_passed;
     printf("\n");
@@ -557,8 +581,8 @@ int main() {
     printf("\n");
     if (!all_passed) goto done;
 
-    printf("=== Benchmark Tests ===\n\n");
-    for (uint32_t e = 8; e <= 27; ++e) {
+    if (!skip_benchmark) printf("=== Benchmark Tests ===\n\n");
+    for (uint32_t e = 8; !skip_benchmark && e <= 27; ++e) {
         
         uint32_t L_a = 1u << e;
         uint32_t L_b = L_a;

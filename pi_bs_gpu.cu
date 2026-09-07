@@ -257,7 +257,7 @@ cudaError_t profile_mul(
         A.batch_size,
         A.length,
         B.length,
-        ((size_t)A.length + (size_t)B.length) > BATCH_MUL_NAIVE_L_MAX,
+        ((size_t)A.length + (size_t)B.length) > BATCH_MP_MUL_NAIVE_CUTOFF,
         profiler,
         [&]() { return batch_mp_mul(context, A, B, C); }
     );
@@ -502,8 +502,12 @@ cudaError_t profile_decimal_convert(
 
 // do binary splitting for N * 17 elements, where N is a power of 2
 cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr){
+    if (context == nullptr || N <= 0 || (N & (N - 1)) != 0) {
+        return cudaErrorInvalidValue;
+    }
     // pre-allocate workspace for the 2^28 case
-    batch_mp_ensure_workspace(context, 6442450944ull);
+    cudaError_t workspace_err = batch_mp_ensure_workspace(context, 6442450944ull);
+    if (workspace_err != cudaSuccess) return workspace_err;
 
     BatchMPArray P0 = {};
     BatchMPArray Q0 = {};
@@ -530,10 +534,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     }
     uint32_t * const temp_prod_workspace_base = temp_prod_workspace;
     
-    if (context == nullptr || (N & (N - 1)) != 0) {
-        return cudaErrorInvalidValue;
-    }
-
     auto release_array = [](BatchMPArray &array) {
         if (array.data != nullptr) {
             batch_mp_array_release(array);
@@ -940,7 +940,12 @@ uint32_t round_up_decimal_digits(uint32_t requested_digits) {
 
 uint32_t compute_prec_limbs_for_digits(uint32_t digits) {
     const uint32_t prec_bits = (uint32_t)((double)digits * 3.322) + 31u;
-    return prec_bits / 32u + 1u;
+    // The 3.322 estimate supplies ample margin for large requests, but almost
+    // none at small sizes. Allow for a partially filled leading denominator
+    // limb, quotient truncation and the decimal converter's guard bits.
+    const uint32_t guarded_bits =
+        (uint32_t)ceil((double)digits * 3.32192809488736234787) + 128u;
+    return std::max(prec_bits / 32u + 1u, (guarded_bits + 31u) / 32u);
 }
 
 uint32_t limb_bit_length(uint32_t limb) {
@@ -1196,14 +1201,14 @@ cudaError_t recursive_inverse(
     size_t L_y2 = x.length + 1;
 
     y_out = batch_mp_array_create(1, x.length);
-    cudaMemset(y_out.data, 0, y_out.length * sizeof(uint32_t));
+    if (y_out.data == nullptr) return cudaErrorMemoryAllocation;
+    cudaError_t err = cudaMemset(y_out.data, 0, y_out.length * sizeof(uint32_t));
+    if (err != cudaSuccess) return err;
 
     size_t total_workspace = L_res + L_res2 + L_y2;
-    uint32_t * workspace_base;
-    cudaMalloc(&workspace_base, total_workspace * sizeof(uint32_t));
-    if (workspace_base == nullptr) {
-        return cudaErrorMemoryAllocation;
-    }
+    uint32_t * workspace_base = nullptr;
+    err = cudaMalloc(&workspace_base, total_workspace * sizeof(uint32_t));
+    if (err != cudaSuccess) return err;
     auto release_all = [&]() {
         cudaFree(workspace_base);
     };
@@ -1216,7 +1221,8 @@ cudaError_t recursive_inverse(
     uint32_t * y2_base = workspace_cur;
     workspace_cur += L_y2;
 
-    cudaMemset(workspace_base, 0, L_res * sizeof(uint32_t));
+    err = cudaMemset(workspace_base, 0, L_res * sizeof(uint32_t));
+    CHECK_AND_RETURN(err, release_all());
 
     // We put y to the right end of the L_y space so that (y << m) is no-op
     // the same for res
@@ -1256,7 +1262,8 @@ cudaError_t recursive_inverse(
             return err;
         }
     }
-    res.compact(context);
+    err = res.compact(context);
+    CHECK_AND_RETURN(err, release_all());
 
     for (int i = (int)(levels.size()) - 1; i > 0; i --){
         size_t L1 = levels[i];
@@ -1270,25 +1277,29 @@ cudaError_t recursive_inverse(
             .batch_size = 1,
             .stride = x2.length + y1.length
         };
-        profile_mul(context, x2, y1, x2y1, "x2*y", L2 >> 5, profiler);
+        err = profile_mul(context, x2, y1, x2y1, "x2*y", L2 >> 5, profiler);
+        CHECK_AND_RETURN(err, release_all());
         BatchMPArray res1_m = {
             .data = res.data - (uint32_t)(m >> 5),
             .length = res.length + (uint32_t)(m >> 5) + 1,
             .batch_size = 1,
             .stride = res.length + (uint32_t)(m >> 5) + 1,
         };
-        profile_sub(context, res1_m, x2y1, res1_m, "res1_m", L2 >> 5, profiler);
-        uint32_t top_limb;
-        cudaMemcpy(&top_limb, res1_m.data + res1_m.length - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        err = profile_sub(context, res1_m, x2y1, res1_m, "res1_m", L2 >> 5, profiler);
+        CHECK_AND_RETURN(err, release_all());
+        uint32_t top_limb = 0u;
+        err = cudaMemcpy(&top_limb, res1_m.data + res1_m.length - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        CHECK_AND_RETURN(err, release_all());
         bool is_negative = false;
         if (top_limb >= 0x80000000u){
             is_negative = true;
-            profile_sub(context, {
+            err = profile_sub(context, {
                 .data = res1_m.data,
                 .length = 0,
                 .batch_size = 1,
                 .stride = 0
             }, res1_m, res1_m, "res1_m_neg", L2 >> 5, profiler);
+            CHECK_AND_RETURN(err, release_all());
         }
         BatchMPArray res2 = {
             .data = res2_base,
@@ -1296,7 +1307,8 @@ cudaError_t recursive_inverse(
             .batch_size = 1,
             .stride = res1_m.length + y1.length
         };
-        profile_mul(context, res1_m, y1, res2, "res2*y", L2 >> 5, profiler);
+        err = profile_mul(context, res1_m, y1, res2, "res2*y", L2 >> 5, profiler);
+        CHECK_AND_RETURN(err, release_all());
 
         BatchMPArray y2 = {
             .data = y2_base,
@@ -1304,17 +1316,20 @@ cudaError_t recursive_inverse(
             .batch_size = 1,
             .stride = res2.length - (uint32_t)((L2 - m * 2) >> 5)
         };
-        shift_right_large(context, res2, L2 - m * 2u, y2, "y2", L2 >> 5, profiler);
+        err = shift_right_large(context, res2, L2 - m * 2u, y2, "y2", L2 >> 5, profiler);
+        CHECK_AND_RETURN(err, release_all());
         if (is_negative){
-            profile_add_small(context, y2, 1, y2, "y2_inc", L2 >> 5, profiler);
+            err = profile_add_small(context, y2, 1, y2, "y2_inc", L2 >> 5, profiler);
+            CHECK_AND_RETURN(err, release_all());
         }
 
         BatchMPArray y_new = make_subview(y_out, (L - L2) >> 6, y_out.length - ((L - L2) >> 6));
         if (!is_negative) {
-            profile_add(context, y_new, y2, y_new, "(y<<m)+y2", L2 >> 5, profiler);
+            err = profile_add(context, y_new, y2, y_new, "(y<<m)+y2", L2 >> 5, profiler);
         } else {
-            profile_sub(context, y_new, y2, y_new, "(y<<m)-y2", L2 >> 5, profiler);
+            err = profile_sub(context, y_new, y2, y_new, "(y<<m)-y2", L2 >> 5, profiler);
         }
+        CHECK_AND_RETURN(err, release_all());
         if (L2 != L){
             BatchMPArray x_next = make_subview(x, (L - L2) >> 6, x.length - ((L - L2) >> 6));
             res = {
@@ -1329,13 +1344,16 @@ cudaError_t recursive_inverse(
                 .batch_size = 1,
                 .stride = y2.length + x_next.length
             };
-            profile_mul(context, y2, x_next, y2x, "y2*x", L2 >> 5, profiler);
+            err = profile_mul(context, y2, x_next, y2x, "y2*x", L2 >> 5, profiler);
+            CHECK_AND_RETURN(err, release_all());
             if (!is_negative){
-                profile_sub(context, res, y2x, res, "(res<<m)-y2x", L2 >> 5, profiler);
+                err = profile_sub(context, res, y2x, res, "(res<<m)-y2x", L2 >> 5, profiler);
             }else{
-                profile_sub(context, y2x, res, res, "y2x-(res<<m)", L2 >> 5, profiler);
+                err = profile_sub(context, y2x, res, res, "y2x-(res<<m)", L2 >> 5, profiler);
             }
-            res.compact(context);
+            CHECK_AND_RETURN(err, release_all());
+            err = res.compact(context);
+            CHECK_AND_RETURN(err, release_all());
         }
     }
     cudaFree(workspace_base);
@@ -1344,7 +1362,8 @@ cudaError_t recursive_inverse(
 }
 
 cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q, StageProfiler * profiler = nullptr) {
-    batch_mp_ensure_workspace(context, 6442450944ull >> 2);
+    cudaError_t workspace_err = batch_mp_ensure_workspace(context, 6442450944ull >> 2);
+    if (workspace_err != cudaSuccess) return workspace_err;
     /*
     p_15 = mpz(4001)
     q_15 = mpz(40)
@@ -1535,12 +1554,17 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
 
     p_final, q_final = truncate_limbs_quotient(p_final, q_final, prec_limbs)
     */
+    // Chudnovsky gains log10(640320^3 / 1728) = 14.181647... digits
+    // per term. Round down and allow a guard term's worth of precision.
+    // The old 14.3 estimate undercomputed near power-of-two boundaries.
+    const double working_digits = (double)target_digits + 16.0;
     int N = 1;
-    while (N * 17 * 14.3 < target_digits) {
+    while (N * 17 * 14.18 < working_digits) {
         N *= 2;
     }
-    int prec_limbs = ((long)(target_digits * 3.322) + 31) / 32 + 1;
+    int prec_limbs = (int)compute_prec_limbs_for_digits((uint32_t)target_digits);
     BatchMPArray Q_bs{}, R_bs{};
+    BatchMPArray Q_scaled{};
     BatchMPArray R_shifted{};
     BatchMPArray P_15{}, Q_15{};
     BatchMPArray P_final{};
@@ -1554,6 +1578,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     auto release_all = [&]() {
         release_array(&Q_bs);
         release_array(&R_bs);
+        release_array(&Q_scaled);
         release_array(&R_shifted);
         release_array(&P_15);
         release_array(&Q_15);
@@ -1572,6 +1597,26 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     cudaError_t err = binary_split_batched(context, N, Q_bs, R_bs, profiler);
     CHECK_AND_RETURN(err, release_all());
     long r_total_shift = 15ull * N * 17 - 8;
+    // At small sizes, common-factor cancellation can leave Q shorter than
+    // the requested precision. Preserve more low bits of R by scaling Q
+    // and R by the same power of two before truncating R's implicit scale.
+    // Without this, e.g. 477 requested digits lose accuracy at digit 445.
+    const long guard_scale_bits = std::min(r_total_shift,
+        32l * std::max(0l, (long)prec_limbs + 1l - (long)Q_bs.length));
+    if (guard_scale_bits != 0) {
+        Q_scaled = batch_mp_array_create(1u,
+            Q_bs.length + (uint32_t)((guard_scale_bits + 31) / 32));
+        if (Q_scaled.data == nullptr) {
+            CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+        }
+        err = profile_shift_bits(context, Q_bs, Q_scaled, (int32_t)guard_scale_bits,
+            "Q_guard_scale", (uint32_t)target_digits, profiler);
+        CHECK_AND_RETURN(err, release_all());
+        release_array(&Q_bs);
+        Q_bs = Q_scaled;
+        Q_scaled = {};
+        r_total_shift -= guard_scale_bits;
+    }
     int r_total_shift_bits = r_total_shift % 32;
     int r_total_shift_limbs = r_total_shift / 32;
 
@@ -1606,7 +1651,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         .stride = R_shifted.length - extra_limbs
     };
 
-    err = sqrt_10005(context, target_digits, P_15, Q_15, profiler);
+    err = sqrt_10005(context, (int)working_digits, P_15, Q_15, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     P_final = batch_mp_array_create(1, P_15.length + Q_truncated.length);
@@ -1641,11 +1686,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     const uint64_t q_bits_count = q_bits_count_u32;
     const uint64_t inverse_bits = q_bits_count * 2u - 1u;
 
-    inv_q_final = batch_mp_array_create(1u, Q_truncated_final.length + 1u);
-    if (inv_q_final.data == nullptr) {
-        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
-    }
-
+    // recursive_inverse owns allocation of its output.
     err = recursive_inverse(context, Q_truncated_final, inverse_bits, inv_q_final, (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
@@ -1669,8 +1710,15 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
 
-    const uint64_t final_shift = inverse_bits - (uint64_t)prec_limbs * 32u;
-    err = shift_right_large(context, ret_product, final_shift, ret_final, "RET_shift", (uint32_t)target_digits, profiler);
+    const uint64_t result_bits = (uint64_t)prec_limbs * 32u;
+    if (inverse_bits >= result_bits) {
+        err = shift_right_large(context, ret_product, inverse_bits - result_bits,
+            ret_final, "RET_shift", (uint32_t)target_digits, profiler);
+    } else {
+        // Very small requests can need a left shift after normalization.
+        err = profile_shift_bits(context, ret_product, ret_final,
+            (int32_t)(result_bits - inverse_bits), "RET_shift", (uint32_t)target_digits, profiler);
+    }
     CHECK_AND_RETURN(err, release_all());
     err = profile_compact(context, ret_final, "RET", (uint32_t)target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());

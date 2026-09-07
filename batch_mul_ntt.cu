@@ -282,10 +282,11 @@ __global__ void fft_level_forward_radix16(
 __global__ void fft_level_forward_radix16_initial(
     uint32_t * A, uint32_t * B, uint3 * parts, int k, int i,
     uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B
+    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B,
+    bool square = false
 ){
     const uint32_t step = 1u << (k - 4 - i);
-    size_t N_half = N >> 1;
+    size_t N_half = square ? N : N >> 1;
 
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 4)); j += blockDim.x * gridDim.x){
         size_t group = j >> (k - 4 - i);
@@ -422,12 +423,13 @@ __global__ void fft_level_forward_radix32(
 __global__ void fft_level_forward_radix32_initial(
     uint32_t * A, uint32_t * B, uint3 *parts, int k, int i,
     uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B
+    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B,
+    bool square = false
 ){
     __shared__ uint3 local_coefs[32][32];
     const uint32_t step = 1u << (k - 5 - i);
     const uint32_t seq_len = 1u << i;
-    size_t N_half = N >> 1;
+    size_t N_half = square ? N : N >> 1;
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 5)); j += blockDim.x * gridDim.x){
         size_t group = j >> (k - 5 - i);
         size_t offset = group << (k - i);
@@ -521,12 +523,13 @@ __global__ void fft_level_forward_radix256(
 __global__ void fft_level_forward_radix256_initial(
     uint32_t * A, uint32_t * B, uint3 *parts, int k, int i,
     uint3 *roots_table_lv1, uint3 *roots_table_lv2,
-    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B
+    size_t N, uint32_t L_a, uint32_t L_b, uint32_t stride_A, uint32_t stride_B,
+    bool square = false
 ){
     __shared__ uint3 local_coefs[256][16];
     const uint32_t step = 1u << (k - 8 - i);
     const uint32_t seq_len = 1u << i;
-    size_t N_half = N >> 1;
+    size_t N_half = square ? N : N >> 1;
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < (N << (k - 8)); j += blockDim.x * gridDim.x){
         size_t group = j >> (k - 8 - i);
         size_t offset = group << (k - i);
@@ -619,6 +622,70 @@ __global__ void pointwise_mul(uint3 * parts_a, uint3 * parts_b, size_t total, ui
     uint3 scalar = scalar_ptr[0];
     for (size_t j = threadIdx.x + blockIdx.x * blockDim.x; j < total; j += blockDim.x * gridDim.x){
         parts_a[j] = mul_mod(mul_mod(parts_a[j], parts_b[j]), scalar);
+    }
+}
+
+// Keep both local forward transforms and their product in shared memory.
+// When the inverse schedule uses an equal or smaller tile, do its local
+// stages here as well, avoiding intermediate global-memory round trips.
+template<int max_local_size>
+__global__ void fft_local_product(
+    uint3 * parts_a, const uint3 * parts_b, int k, int i,
+    const uint3 * roots_table_lv1, const uint3 * roots_table_lv2,
+    size_t N, const uint3 * scalar_ptr, int backward_levels
+){
+    const int depth = k - i;
+    const uint32_t local_size = 1u << depth;
+    __shared__ uint3 a[max_local_size];
+    __shared__ uint3 b[max_local_size];
+    const uint3 scalar = *scalar_ptr;
+    for (size_t j = (size_t)blockIdx.x << depth; j < (N << k);
+         j += (size_t)gridDim.x << depth){
+        const uint32_t seq_id = (j >> depth) & ((1u << i) - 1u);
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            a[t] = parts_a[j + t];
+            b[t] = parts_b[j + t];
+        }
+        __syncthreads();
+        for (int lv = depth - 1; lv >= 0; --lv){
+            const uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size / 2; t += blockDim.x){
+                const int idx = ((t >> lv) << lv) + t;
+                const uint32_t root_idx = ((seq_id << (depth - 1 - lv)) | (idx >> (lv + 1))) * 2;
+                uint3 w = roots_table_lv2[root_idx & 0xffff];
+                if (root_idx >= 65536) w = mul_mod(w, roots_table_lv1[root_idx >> 16]);
+                const uint3 ua = a[idx], ub = b[idx];
+                const uint3 va = mul_mod(a[idx + stride], w);
+                const uint3 vb = mul_mod(b[idx + stride], w);
+                a[idx] = add_mod(ua, va);
+                a[idx + stride] = sub_mod(ua, va);
+                b[idx] = add_mod(ub, vb);
+                b[idx + stride] = sub_mod(ub, vb);
+            }
+            __syncthreads();
+        }
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            a[t] = mul_mod(mul_mod(a[t], b[t]), scalar);
+        }
+        __syncthreads();
+        for (int lv = 0; lv < backward_levels; ++lv){
+            const uint32_t stride = 1u << lv;
+            for (int t = threadIdx.x; t < local_size / 2; t += blockDim.x){
+                const int idx = ((t >> lv) << lv) + t;
+                uint32_t root_idx = ((seq_id << (depth - 1 - lv)) | (idx >> (lv + 1))) * 2;
+                root_idx = __brev(-__brev(root_idx));
+                uint3 w = roots_table_lv2[root_idx & 0xffff];
+                if (root_idx >= 65536) w = mul_mod(w, roots_table_lv1[root_idx >> 16]);
+                const uint3 u = a[idx], v = a[idx + stride];
+                a[idx] = add_mod(u, v);
+                a[idx + stride] = mul_mod(sub_mod(u, v), w);
+            }
+            __syncthreads();
+        }
+        for (int t = threadIdx.x; t < local_size; t += blockDim.x){
+            parts_a[j + t] = a[t];
+        }
+        __syncthreads();
     }
 }
 
@@ -1963,33 +2030,57 @@ void batch_mul_ntt(
         return;
     }
 
+    // Squaring needs only one forward transform. Keep parts_b as scratch for
+    // the inverse transform's carry reconstruction.
+    const bool square = A == B && L_a == L_b && stride_A == stride_B;
     for (uint32_t ni = 0; ni < N_total; ni += N_batch){
         uint32_t N = min(N_total - ni, N_batch);
+        const uint32_t forward_N = square ? N : N * 2;
         uint3 * parts_a = reinterpret_cast<uint3 *>(workspace);
         uint3 * parts_b = reinterpret_cast<uint3 *>(workspace + (((size_t)N) << k) * 3);
+        const int i0 = backward_schedule_local_start(k);
+        bool fused_product = false;
+        bool fused_backward = false;
 
         for (int i = 0; i < k; ){
             int schedule_op = forward_schedule_op(k, i);
             if (schedule_op == FFT_SCHEDULE_LOCAL){
                 int local_size = 1 << (k - i);
-                int num_blocks = min((((size_t)N) << (i + 1)), (size_t)65536);
+                if (!square && local_size <= 2048){
+                    fused_product = true;
+                    fused_backward = i0 >= i;
+                    const int blocks = min((size_t)N << i, (size_t)65536);
+                    if (local_size <= 1024){
+                        fft_local_product<1024><<<blocks, min(local_size >> 1, 256)>>>(
+                            parts_a, parts_b, k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N, tables.inv2n_table + k, fused_backward ? k - i0 : 0
+                        );
+                    }else{
+                        fft_local_product<2048><<<blocks, 512>>>(
+                            parts_a, parts_b, k, i, tables.roots_table_lv1, tables.roots_table_lv2,
+                            N, tables.inv2n_table + k, fused_backward ? k - i0 : 0
+                        );
+                    }
+                    break;
+                }
+                int num_blocks = min((((size_t)forward_N) << i), (size_t)65536);
                 if (k - i <= 10){
                     fft_level_forward_final<1024><<<num_blocks, min(local_size >> 1, 256)>>>(
                         parts_a,
                         k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                        N * 2 // we use 2 * N to do parts_a and parts_b
+                        forward_N
                     );
                 }else if (k - i == 11){
                     fft_level_forward_final<2048><<<num_blocks, min(local_size >> 1, 256)>>>(
                         parts_a,
                         k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                        N * 2 // we use 2 * N to do parts_a and parts_b
+                        forward_N
                     );
                 }else{
                     fft_level_forward_final<4096><<<num_blocks, min(local_size >> 1, 512)>>>(
                         parts_a,
                         k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                        N * 2 // we use 2 * N to do parts_a and parts_b
+                        forward_N
                     );
                 }
                 break;
@@ -2000,14 +2091,14 @@ void batch_mul_ntt(
                         fft_level_forward_radix256<<<num_blocks, dim3(16, 32, 1)>>>(
                             parts_a, // parts_b must be adjacent to it
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
+                            forward_N
                         );
                     }else{
                         fft_level_forward_radix256_initial<<<num_blocks, dim3(16, 32, 1)>>>(
                             A, B,
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b, stride_A, stride_B
+                            forward_N, L_a, L_b, stride_A, stride_B, square
                         );
                     }
                     i += 8;
@@ -2017,7 +2108,7 @@ void batch_mul_ntt(
                         fft_level_forward_radix32<<<num_blocks, dim3(32, 8, 1)>>>(
                             parts_a, // parts_b must be adjacent to it
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2 // we use 2 * N to do parts_a and parts_b simultaneously
+                            forward_N
                         );
                         
                     }else{
@@ -2025,7 +2116,7 @@ void batch_mul_ntt(
                             A, B,
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b, stride_A, stride_B
+                            forward_N, L_a, L_b, stride_A, stride_B, square
                         );
                     }
                     i += 5;
@@ -2035,14 +2126,14 @@ void batch_mul_ntt(
                         fft_level_forward_radix16<<<num_blocks, 64>>>(
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2
+                            forward_N
                         );
                     }else{
                         fft_level_forward_radix16_initial<<<num_blocks, 64>>>(
                             A, B,
                             parts_a,
                             k, i, tables.roots_table_lv1, tables.roots_table_lv2,
-                            N * 2, L_a, L_b, stride_A, stride_B
+                            forward_N, L_a, L_b, stride_A, stride_B, square
                         );
                     }
                     i += 4;
@@ -2051,14 +2142,13 @@ void batch_mul_ntt(
         }
 
         // fuse divide by K into pointwise mul
-        if (true){
+        if (!fused_product){
             const int threads_per_block = 512;
             int num_blocks = min(((((size_t)N) << k) + threads_per_block - 1) / threads_per_block, (size_t)65536);
-            pointwise_mul<<<num_blocks, threads_per_block>>>(parts_a, parts_b, ((size_t)N) << k, tables.inv2n_table + k);
+            pointwise_mul<<<num_blocks, threads_per_block>>>(parts_a, square ? parts_a : parts_b, ((size_t)N) << k, tables.inv2n_table + k);
         }
         
-        int i0 = backward_schedule_local_start(k);
-        {
+        if (!fused_backward){
             int num_blocks = min((((size_t)N) << (i0 + 1)), (size_t)65536);
             int local_size = 1 << (k - i0);
             if (local_size <= 1024){

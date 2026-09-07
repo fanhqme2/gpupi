@@ -97,7 +97,9 @@ bool test_mul(BatchMPContext *ctx) {
     };
 
     const CaseConfig cases[] = {
-        {"naive_boundary", 4, 512, 512},
+        {"naive_boundary", 4, 256, 256},
+        {"ntt_crossover", 4, 256, 257},
+        {"ntt_1024", 4, 512, 512},
         {"ntt_boundary", 3, 513, 512},
         {"ntt_workspace_growth", 2, 2200, 2200},
     };
@@ -141,11 +143,11 @@ bool test_mul(BatchMPContext *ctx) {
 
         const size_t workspace_after = batch_mp_workspace_size(ctx);
         printf("  workspace: %zu -> %zu bytes\n", previous_workspace, workspace_after);
-        if (cfg.L_a + cfg.L_b <= 1024 && workspace_after != previous_workspace) {
+        if (cfg.L_a + cfg.L_b <= BATCH_MP_MUL_NAIVE_CUTOFF && workspace_after != previous_workspace) {
             fprintf(stderr, "Naive multiply unexpectedly changed workspace size\n");
             return false;
         }
-        if (cfg.L_a + cfg.L_b > 1024 && workspace_after < previous_workspace) {
+        if (cfg.L_a + cfg.L_b > BATCH_MP_MUL_NAIVE_CUTOFF && workspace_after < previous_workspace) {
             fprintf(stderr, "Workspace size shrank after NTT multiply\n");
             return false;
         }

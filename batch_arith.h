@@ -7,6 +7,9 @@
 
 struct BatchMPContext;
 
+// Dispatch crossover, distinct from the naive kernel's maximum supported size.
+constexpr uint32_t BATCH_MP_MUL_NAIVE_CUTOFF = 512u;
+
 struct BatchMPArray {
     uint32_t *data;
     uint32_t length;
@@ -43,7 +46,7 @@ size_t batch_mp_workspace_size(const BatchMPContext * ctx);
 cudaError_t batch_mp_ensure_workspace(BatchMPContext *ctx, size_t required_bytes);
 
 // Multiply N pairs of large integers.
-// Uses the naive kernel when L_a + L_b <= 1024, otherwise uses the NTT kernel.
+// Uses the naive kernel through BATCH_MP_MUL_NAIVE_CUTOFF product limbs.
 // Returns cudaErrorInvalidValue if the batch dimensions mismatch or if C.length != A.length + B.length.
 cudaError_t batch_mp_mul(
     BatchMPContext * ctx,
