@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <type_traits>
 
 #include "batch_bitlength.h"
 
@@ -21,9 +22,12 @@ __device__ __forceinline__ uint32_t bitlength_word(uint32_t word) {
 }
 
 template<LengthMode MODE>
-__device__ __forceinline__ uint32_t measure_nonzero_word(uint32_t index, uint32_t word) {
+using LengthResult = typename std::conditional<MODE == LengthMode::Bit, unsigned long long, uint32_t>::type;
+
+template<LengthMode MODE>
+__device__ __forceinline__ LengthResult<MODE> measure_nonzero_word(uint32_t index, uint32_t word) {
     if constexpr (MODE == LengthMode::Bit) {
-        return index * 32u + bitlength_word(word);
+        return (unsigned long long)index * 32u + bitlength_word(word);
     } else {
         (void)word;
         return index + 1u;
@@ -33,19 +37,19 @@ __device__ __forceinline__ uint32_t measure_nonzero_word(uint32_t index, uint32_
 template<LengthMode MODE, int THREADS>
 __global__ void batch_bitlength_thread_kernel(
     const uint32_t * A,
-    uint32_t * result,
+    LengthResult<MODE> * result,
     uint32_t N,
     uint32_t L,
     uint32_t stride_A
 ) {
-    uint32_t local_max = 0u;
+    LengthResult<MODE> local_max = 0u;
     uint32_t local_max_limb = 0u;
     for (uint32_t idx0 = blockIdx.x * blockDim.x; idx0 < N; idx0 += gridDim.x * blockDim.x) {
         const uint32_t idx = idx0 + threadIdx.x;
         if (idx >= N) continue;
 
         const uint32_t * row = A + (size_t)idx * stride_A;
-        uint32_t local = 0u;
+        LengthResult<MODE> local = 0u;
         for (uint32_t offset = 0; offset < L - local_max_limb; ++offset) {
             const uint32_t i = L - 1u - offset;
             const uint32_t word = row[i];
@@ -63,7 +67,7 @@ __global__ void batch_bitlength_thread_kernel(
 template<LengthMode MODE>
 __global__ void batch_bitlength_warp_kernel(
     const uint32_t * A,
-    uint32_t * result,
+    LengthResult<MODE> * result,
     uint32_t N,
     uint32_t L,
     uint32_t stride_A
@@ -72,10 +76,10 @@ __global__ void batch_bitlength_warp_kernel(
     const uint32_t warps_per_block = blockDim.y;
     const uint32_t warp_global = blockIdx.x * warps_per_block + threadIdx.y;
     const uint32_t warp_stride = gridDim.x * warps_per_block;
-    uint32_t local_max = 0u;
+    LengthResult<MODE> local_max = 0u;
     for (uint32_t idx = warp_global; idx < N; idx += warp_stride) {
         const uint32_t * row = A + (size_t)idx * stride_A;
-        uint32_t local = 0u;
+        LengthResult<MODE> local = 0u;
         const int64_t top_base = ((int64_t)L - 1) & ~31ll;
         for (int64_t base = top_base; base >= 0; base -= 32) {
             const uint32_t i = (uint32_t)base + lane;
@@ -102,17 +106,17 @@ __global__ void batch_bitlength_warp_kernel(
 template<LengthMode MODE, int THREADS>
 __global__ void batch_bitlength_chunk_kernel(
     const uint32_t * A,
-    uint32_t * result,
+    LengthResult<MODE> * result,
     uint32_t N,
     uint32_t L,
     uint32_t stride_A
 ) {
-    __shared__ uint32_t shared_best[THREADS];
+    __shared__ LengthResult<MODE> shared_best[THREADS];
 
     const uint32_t chunk_count = (L + kChunkSize - 1u) / kChunkSize;
     for (uint32_t idx = blockIdx.y; idx < N; idx += gridDim.y) {
         const uint32_t * row = A + (size_t)idx * stride_A;
-        uint32_t local_best = 0u;
+        LengthResult<MODE> local_best = 0u;
 
         for (uint32_t chunk_idx = blockIdx.x; chunk_idx < chunk_count; chunk_idx += gridDim.x) {
             const uint32_t chunk_start = (chunk_count - 1 - chunk_idx) * kChunkSize;
@@ -179,11 +183,11 @@ __global__ void batch_bitlength_chunk_kernel(
 size_t batch_bitlength_workspace_size(uint32_t N, uint32_t L) {
     (void)N;
     (void)L;
-    return 4;
+    return sizeof(unsigned long long);
 }
 
 template<LengthMode MODE>
-uint32_t batch_length_max_impl(
+LengthResult<MODE> batch_length_max_impl(
     const uint32_t * A,
     uint32_t * workspace,
     uint32_t N,
@@ -194,8 +198,8 @@ uint32_t batch_length_max_impl(
         return 0u;
     }
 
-    uint32_t * d_result = workspace;
-    cudaMemset(d_result, 0, sizeof(uint32_t));
+    LengthResult<MODE> * d_result = reinterpret_cast<LengthResult<MODE> *>(workspace);
+    cudaMemset(d_result, 0, sizeof(LengthResult<MODE>));
 
     if (L <= kSmallLThreadThreshold) {
         const int threads_per_block = 128;
@@ -219,12 +223,12 @@ uint32_t batch_length_max_impl(
         );
     }
 
-    uint32_t h_result = 0u;
-    cudaMemcpy(&h_result, d_result, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    LengthResult<MODE> h_result = 0u;
+    cudaMemcpy(&h_result, d_result, sizeof(LengthResult<MODE>), cudaMemcpyDeviceToHost);
     return h_result;
 }
 
-uint32_t batch_bitlength_max(
+uint64_t batch_bitlength_max(
     const uint32_t * A,
     uint32_t * workspace,
     uint32_t N,

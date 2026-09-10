@@ -90,11 +90,11 @@ void words_to_mpz(mpz_t out, const uint32_t * words, size_t count) {
     mpz_import(out, count, -1, sizeof(uint32_t), 0, 0, words);
 }
 
-uint32_t gmp_bitlength(const uint32_t * words, uint32_t L) {
+uint64_t gmp_bitlength(const uint32_t * words, uint32_t L) {
     mpz_t value;
     mpz_init(value);
     words_to_mpz(value, words, L);
-    const uint32_t bits = (mpz_sgn(value) == 0) ? 0u : (uint32_t)mpz_sizeinbase(value, 2);
+    const uint64_t bits = (mpz_sgn(value) == 0) ? 0u : (uint64_t)mpz_sizeinbase(value, 2);
     mpz_clear(value);
     return bits;
 }
@@ -184,14 +184,14 @@ bool test_configuration(
     fill_input_device(d_A, N, L, stride, mode, seed);
     CUDA_CHECK(cudaMemcpy(h_A.data(), d_A, size_A, cudaMemcpyDeviceToHost));
 
-    uint32_t expected = 0u;
+    uint64_t expected = 0u;
     uint32_t expected_limbs = 0u;
     for (uint32_t i = 0; i < N; ++i) {
-        expected = std::max(expected, gmp_bitlength(h_A.data() + (size_t)i * stride, L));
+        expected = std::max<uint64_t>(expected, gmp_bitlength(h_A.data() + (size_t)i * stride, L));
         expected_limbs = std::max(expected_limbs, host_limblength(h_A.data() + (size_t)i * stride, L));
     }
 
-    const uint32_t actual = batch_bitlength_max(d_A, d_workspace, N, L, stride);
+    const uint64_t actual = batch_bitlength_max(d_A, d_workspace, N, L, stride);
     const uint32_t actual_limbs = batch_limblength_max(d_A, d_workspace, N, L, stride);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -200,7 +200,7 @@ bool test_configuration(
     bool pass = (actual == expected) && (actual_limbs == expected_limbs);
     if (!pass && verbose) {
         if (actual != expected) {
-            printf("  Bitlength mismatch: expected=%u actual=%u\n", expected, actual);
+            printf("  Bitlength mismatch: expected=%llu actual=%llu\n", (unsigned long long)expected, (unsigned long long)actual);
         }
         if (actual_limbs != expected_limbs) {
             printf("  Limblength mismatch: expected=%u actual=%u\n", expected_limbs, actual_limbs);
@@ -264,7 +264,7 @@ void benchmark_configuration(
     CUDA_CHECK(cudaEventCreate(&stop));
 
     CUDA_CHECK(cudaEventRecord(start));
-    uint32_t last_result = 0u;
+    uint64_t last_result = 0u;
     for (int i = 0; i < iterations; ++i) {
         last_result = batch_bitlength_max(d_A, d_workspace, N, L, stride);
     }
@@ -278,13 +278,13 @@ void benchmark_configuration(
     const double read_bytes = (double)N * (double)L * sizeof(uint32_t);
     const double bandwidth_gb_s = read_bytes / (avg_ms * 1e-3) / 1e9;
 
-    printf("  params size %4dM, workspace size %4dM Average time: %6.3f ms Throughput: %8.3f Mnum/s Bandwidth: %6.2f GB/s Result=%u\n",
+    printf("  params size %4dM, workspace size %4dM Average time: %6.3f ms Throughput: %8.3f Mnum/s Bandwidth: %6.2f GB/s Result=%llu\n",
            int(size_A / 1000000),
            int(workspace_size / 1000000),
            avg_ms,
            numbers_per_sec_m,
            bandwidth_gb_s,
-           last_result);
+           (unsigned long long)last_result);
 
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));

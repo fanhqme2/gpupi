@@ -46,19 +46,17 @@ cudaError_t ensure_workspace(BatchMPContext *ctx, size_t required_bytes) {
         return cudaSuccess;
     }
 
+    // Scratch has no live contents between arithmetic calls. Release it before
+    // growth so the old and new multi-GiB NTT arenas never coexist.
+    if (ctx->workspace != nullptr) {
+        cudaError_t err = cudaFree(ctx->workspace);
+        if (err != cudaSuccess) return err;
+        ctx->workspace = nullptr;
+        ctx->workspace_size_bytes = 0;
+    }
     uint32_t *new_workspace = nullptr;
     cudaError_t err = cudaMalloc(&new_workspace, required_bytes);
-    if (err != cudaSuccess) {
-        return err;
-    }
-
-    if (ctx->workspace != nullptr) {
-        cudaError_t free_err = cudaFree(ctx->workspace);
-        if (free_err != cudaSuccess) {
-            cudaFree(new_workspace);
-            return free_err;
-        }
-    }
+    if (err != cudaSuccess) return err;
 
     ctx->workspace = new_workspace;
     ctx->workspace_size_bytes = required_bytes;
@@ -174,7 +172,8 @@ cudaError_t batch_mp_mul(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, Ba
     if (!same_batch(A, B) || !same_batch(A, C)) {
         return cudaErrorInvalidValue;
     }
-    if (C.length != A.length + B.length) {
+    if ((uint64_t)C.length != (uint64_t)A.length + B.length ||
+        (uint64_t)A.length + B.length > (1ull << 31)) {
         return cudaErrorInvalidValue;
     }
 
@@ -226,7 +225,7 @@ cudaError_t batch_mp_exactdiv_small(BatchMPContext *ctx, BatchMPArray A, uint32_
     if (ctx == nullptr || !valid_array(A)) {
         return cudaErrorInvalidValue;
     }
-    if (B == 0u || (B & 1u) == 0u || A.length > 128u) {
+    if (B == 0u || (B & 1u) == 0u || A.length > 2048u) {
         return cudaErrorInvalidValue;
     }
 
@@ -370,7 +369,7 @@ cudaError_t batch_mp_sub_small(BatchMPContext *ctx, BatchMPArray A, uint32_t B, 
     return cudaGetLastError();
 }
 
-cudaError_t batch_mp_shift_bits(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, int32_t shift_bits) {
+cudaError_t batch_mp_shift_bits(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, int64_t shift_bits) {
     if (ctx == nullptr || !valid_array(A) || !valid_array(B)) {
         return cudaErrorInvalidValue;
     }
@@ -382,7 +381,7 @@ cudaError_t batch_mp_shift_bits(BatchMPContext *ctx, BatchMPArray A, BatchMPArra
     return cudaGetLastError();
 }
 
-cudaError_t batch_mp_bitlength_max(BatchMPContext *ctx, BatchMPArray A, uint32_t *result) {
+cudaError_t batch_mp_bitlength_max(BatchMPContext *ctx, BatchMPArray A, uint64_t *result) {
     if (ctx == nullptr || !valid_array(A) || result == nullptr) {
         return cudaErrorInvalidValue;
     }
@@ -421,4 +420,36 @@ cudaError_t BatchMPArray::compact(BatchMPContext *ctx) {
 
     length = limblength;
     return cudaSuccess;
+}
+
+cudaError_t batch_mp_mul_shared_b(BatchMPContext *ctx, BatchMPArray A,
+    BatchMPArray C, BatchMPArray B, BatchMPArray out_a, BatchMPArray out_c) {
+    if (!ctx || !valid_array(A) || !valid_array(B) || !valid_array(C) ||
+        !valid_array(out_a) || !valid_array(out_c) || !same_batch(A, B) ||
+        !same_batch(A, C) || !same_batch(A, out_a) || !same_batch(A, out_c) ||
+        (uint64_t)A.length + B.length != out_a.length ||
+        (uint64_t)C.length + B.length != out_c.length ||
+        out_a.length > (1ull << 31) || out_c.length > (1ull << 31))
+        return cudaErrorInvalidValue;
+    size_t bytes = batch_mul_ntt_shared_b_workspace_size(A.batch_size, A.length, C.length, B.length);
+    if (!bytes) {
+        cudaError_t err = batch_mp_mul(ctx, A, B, out_a);
+        return err == cudaSuccess ? batch_mp_mul(ctx, C, B, out_c) : err;
+    }
+    cudaError_t err = ensure_workspace(ctx, bytes);
+    if (err != cudaSuccess) return err;
+    batch_mul_ntt_shared_b({A.data, out_a.data, A.length, A.stride, out_a.stride},
+        {C.data, out_c.data, C.length, C.stride, out_c.stride}, B.data, B.length,
+        B.stride, A.batch_size, ctx->workspace, ctx->ntt_tables);
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_exactdiv_small_many(BatchMPContext *ctx, BatchMPArray A,
+    const uint32_t *divisors, uint32_t count) {
+    if (!ctx || !valid_array(A) || A.length > 2048u || count > 32u ||
+        (count && !divisors)) return cudaErrorInvalidValue;
+    for (uint32_t i = 0; i < count; ++i)
+        if (!divisors[i] || !(divisors[i] & 1u)) return cudaErrorInvalidValue;
+    batch_exactdiv_small_many(A.data, divisors, count, A.batch_size, A.length, A.stride);
+    return cudaGetLastError();
 }

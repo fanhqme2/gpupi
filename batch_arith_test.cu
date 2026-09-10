@@ -331,7 +331,7 @@ bool test_exactdiv_small(BatchMPContext *ctx) {
     const CaseConfig cases[] = {
         {"direct", 17, 7, 9, 0x13579BDFu},
         {"tiled", 65, 96, 101, 0xFFFF'FFFDu},
-        {"max_len", 11, 128, 128, 3u},
+        {"max_len", 11, 2048, 2048, 3u},
     };
 
     const size_t previous_workspace = batch_mp_workspace_size(ctx);
@@ -393,9 +393,9 @@ bool test_exactdiv_small(BatchMPContext *ctx) {
         return false;
     }
 
-    ArrayOwner TooLong{make_array(2, 129)};
+    ArrayOwner TooLong{make_array(2, 2049)};
     if (batch_mp_exactdiv_small(ctx, TooLong.array, 3u) != cudaErrorInvalidValue) {
-        fprintf(stderr, "Expected length > 128 to fail in exactdiv-small\n");
+        fprintf(stderr, "Expected length > 2048 to fail in exactdiv-small\n");
         return false;
     }
 
@@ -872,7 +872,7 @@ bool test_bitlength_and_compact(BatchMPContext *ctx) {
 
     CUDA_CHECK(cudaMemcpy(A.array.data, h_A.data(), h_A.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-    uint32_t got = 0u;
+    uint64_t got = 0u;
     uint32_t got_limbs = 0u;
     printf("Running bitlength N=%u L=%u\n", A.array.batch_size, A.array.length);
     CUDA_CHECK(batch_mp_bitlength_max(ctx, A.array, &got));
@@ -898,7 +898,7 @@ bool test_bitlength_and_compact(BatchMPContext *ctx) {
     }
 
     if (got != expected) {
-        fprintf(stderr, "Bitlength mismatch: expected=%u got=%u\n", expected, got);
+        fprintf(stderr, "Bitlength mismatch: expected=%u got=%llu\n", expected, (unsigned long long)got);
         return false;
     }
     if (got_limbs != expected_limbs) {

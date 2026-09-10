@@ -3,13 +3,14 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "batch_exactdiv_small.h"
 
 namespace {
 
 constexpr uint32_t kTileDim = 32u;
-constexpr uint32_t kMaxLimbs = 128u;
+constexpr uint32_t kMaxLimbs = 2048u;
 constexpr uint32_t kDirectThreshold = 8u;
 
 uint32_t invert_odd_u32(uint32_t value) {
@@ -138,4 +139,70 @@ void batch_exactdiv_small(
 
     const uint32_t num_blocks = std::min<uint32_t>((N + kTileDim - 1u) / kTileDim, 65535u);
     batch_exactdiv_small_kernel<<<num_blocks, kTileDim>>>(A, B, B_inv, N, L, stride_A);
+}
+
+namespace {
+struct DivisorChain {
+    uint32_t divisor[22];
+    uint32_t inverse[22];
+};
+
+// Pipeline exact division through several divisors while each limb is live.
+// Each divisor has its own carry across limbs; intermediate quotient arrays
+// never go to global memory. This is the same recurrence as single division.
+template<int COUNT>
+__global__ void exactdiv_chain_kernel(uint32_t *A, DivisorChain factors,
+    uint32_t N, uint32_t L, uint32_t stride) {
+    __shared__ uint32_t tile[32 * 32];
+    const uint32_t lane = threadIdx.x;
+    for (uint32_t base = blockIdx.x * 32u; base < N; base += gridDim.x * 32u) {
+        const uint32_t active = min(32u, N - base);
+        uint32_t carry[COUNT] = {};
+        for (uint32_t first = 0; first < L; first += 32u) {
+            const uint32_t length = min(32u, L - first);
+            for (uint32_t row = 0; row < active; ++row)
+                tile[lane * 32u + row] = lane < length
+                    ? A[(size_t)(base + row) * stride + first + lane] : 0;
+            __syncthreads();
+            if (lane < active) {
+                for (uint32_t limb = 0; limb < length; ++limb) {
+                    uint32_t value = tile[limb * 32u + lane];
+                    #pragma unroll
+                    for (int j = 0; j < COUNT; ++j) {
+                        const uint32_t quotient = (value - carry[j]) * factors.inverse[j];
+                        const uint64_t product = (uint64_t)quotient * factors.divisor[j] + carry[j];
+                        carry[j] = (uint32_t)(product >> 32);
+                        value = quotient;
+                    }
+                    tile[limb * 32u + lane] = value;
+                }
+            }
+            __syncthreads();
+            for (uint32_t row = 0; row < active; ++row)
+                if (lane < length)
+                    A[(size_t)(base + row) * stride + first + lane] = tile[lane * 32u + row];
+            __syncthreads();
+        }
+    }
+}
+} // namespace
+
+void batch_exactdiv_small_many(uint32_t *A, const uint32_t *divisors,
+    uint32_t count, uint32_t N, uint32_t L, uint32_t stride_A) {
+    if (!N || !L || !count) return;
+    if ((count != 4 && count != 11 && count != 22) || std::getenv("GPUPI_OLD_DIVCHAIN")) {
+        for (uint32_t i = 0; i < count; ++i)
+            batch_exactdiv_small(A, divisors[i], N, L, stride_A);
+        return;
+    }
+    assert(A && divisors && L <= kMaxLimbs && L <= stride_A);
+    DivisorChain factors{};
+    for (uint32_t i = 0; i < count; ++i) {
+        factors.divisor[i] = divisors[i];
+        factors.inverse[i] = invert_odd_u32(divisors[i]);
+    }
+    const uint32_t blocks = std::min((N + 31u) / 32u, 65535u);
+    if (count == 4) exactdiv_chain_kernel<4><<<blocks, 32>>>(A, factors, N, L, stride_A);
+    if (count == 11) exactdiv_chain_kernel<11><<<blocks, 32>>>(A, factors, N, L, stride_A);
+    if (count == 22) exactdiv_chain_kernel<22><<<blocks, 32>>>(A, factors, N, L, stride_A);
 }

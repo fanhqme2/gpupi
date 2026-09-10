@@ -2,11 +2,14 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <vector>
+#include <cerrno>
+#include <climits>
 
 #include <gmp.h>
 
@@ -35,17 +38,18 @@ __device__ __forceinline__ void reduce_gcd_quotient(uint32_t &a, uint32_t &b){
 
 // leaf case of binary splitting.
 template<bool is_head>
-__global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * arr_R, int N){
+__global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * arr_R, int N, uint32_t block_offset = 0){
     for (int i2 = blockIdx.x * blockDim.x + threadIdx.x; i2 < N; i2 += blockDim.x * gridDim.x){
-        int i;
+        uint32_t i;
         if (is_head){
             i = i2 * 17 + 16;
         }else{
             i = i2 + (i2 >> 4);
         }
-        uint32_t p1 = 6 * i + 1;
-        uint32_t p2 = 2 * i + 1;
-        uint32_t p3 = 6 * i + 5;
+        i += block_offset * 17u;
+        uint32_t p1 = 6u * i + 1;
+        uint32_t p2 = 2u * i + 1;
+        uint32_t p3 = 6u * i + 5;
         uint32_t q1 = i + 1;
         uint32_t q2 = i + 1;
         uint32_t q3 = i + 1;
@@ -133,7 +137,7 @@ __global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t *
 struct StageProfileEntry {
     const char * kind;
     const char * label;
-    uint32_t n1;
+    uint64_t n1;
     uint32_t batch_size;
     uint32_t lhs_length;
     uint32_t rhs_length;
@@ -150,6 +154,14 @@ namespace {
 
 constexpr uint32_t kBlockCommonDivisorLo = 830297u;
 constexpr uint32_t kBlockCommonDivisorHi = 156590819u;
+// Guaranteed common factors beyond the original 17-term block cancellation.
+// Derivation and residue-exhaustive proof: generate_common_factors.py.
+static const uint32_t kCommon34[] = {980837u};
+static const uint32_t kCommon68[] = {1732459729u, 649235263u, 4255083361u, 146969u};
+static const uint32_t kCommon136[] = {247494247u, 474934849u, 127434929u, 209826283u,
+    518240837u, 927671347u, 1606662479u, 2427855097u, 54567769u, 107972737u, 12317u};
+
+
 constexpr uint32_t kValidationMod = 1000000007u;
 constexpr uint64_t kLimbBaseMod = (1ull << 32) % kValidationMod;
 uint32_t kDecimalLeafDigits = 477u;
@@ -158,7 +170,7 @@ cudaError_t append_stage_profile(
     StageProfiler * profiler,
     const char * kind,
     const char * label,
-    uint32_t n1,
+    uint64_t n1,
     uint32_t batch_size,
     uint32_t lhs_length,
     uint32_t rhs_length,
@@ -184,7 +196,7 @@ template <typename Fn>
 cudaError_t profile_stage(
     const char * kind,
     const char * label,
-    uint32_t n1,
+    uint64_t n1,
     uint32_t batch_size,
     uint32_t lhs_length,
     uint32_t rhs_length,
@@ -192,6 +204,10 @@ cudaError_t profile_stage(
     StageProfiler * profiler,
     Fn && fn
 ) {
+    if (getenv("GPUPI_TRACE")) {
+        fprintf(stderr, "stage kind=%s label=%s n=%" PRIu64 " batch=%u a=%u b=%u\n",
+            kind, label, n1, batch_size, lhs_length, rhs_length);
+    }
     if (profiler == nullptr) {
         return fn();
     }
@@ -247,7 +263,7 @@ cudaError_t profile_mul(
     BatchMPArray B,
     BatchMPArray C,
     const char * label,
-    uint32_t n1,
+    uint64_t n1,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -270,7 +286,7 @@ cudaError_t profile_shift_addsub(
     BatchMPArray C,
     uint32_t shift_amount,
     bool subtract,
-    uint32_t n1,
+    uint64_t n1,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -294,7 +310,7 @@ cudaError_t profile_compact(
     BatchMPContext * context,
     BatchMPArray & array,
     const char * label,
-    uint32_t n1,
+    uint64_t n1,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -315,7 +331,7 @@ cudaError_t profile_exactdiv(
     BatchMPArray array,
     const char * label,
     uint32_t divisor,
-    uint32_t n1,
+    uint64_t n1,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -337,7 +353,7 @@ cudaError_t profile_mul_small(
     uint32_t multiplier,
     BatchMPArray C,
     const char * label,
-    uint32_t digits,
+    uint64_t digits,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -359,7 +375,7 @@ cudaError_t profile_add(
     BatchMPArray B,
     BatchMPArray C,
     const char * label,
-    uint32_t digits,
+    uint64_t digits,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -381,7 +397,7 @@ cudaError_t profile_sub(
     BatchMPArray B,
     BatchMPArray C,
     const char * label,
-    uint32_t digits,
+    uint64_t digits,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -403,7 +419,7 @@ cudaError_t profile_add_small(
     uint32_t value,
     BatchMPArray C,
     const char * label,
-    uint32_t digits,
+    uint64_t digits,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -423,9 +439,9 @@ cudaError_t profile_shift_bits(
     BatchMPContext * context,
     BatchMPArray A,
     BatchMPArray B,
-    int32_t shift_bits,
+    int64_t shift_bits,
     const char * label,
-    uint32_t digits,
+    uint64_t digits,
     StageProfiler * profiler
 ) {
     return profile_stage(
@@ -451,7 +467,7 @@ cudaError_t profile_decimal_precompute_powers(
     return profile_stage(
         "decimal_powers",
         "precompute_5pow",
-        levels == 0u ? leaf_digits : (leaf_digits << levels),
+        levels == 0u ? leaf_digits : ((uint64_t)leaf_digits << levels),
         1u,
         levels,
         leaf_digits,
@@ -464,8 +480,8 @@ cudaError_t profile_decimal_precompute_powers(
 cudaError_t profile_decimal_convert(
     BatchMPContext * context,
     BatchMPArray input,
-    uint32_t input_bits,
-    uint32_t total_digits,
+    uint64_t input_bits,
+    uint64_t total_digits,
     uint32_t leaf_digits,
     const ConvertDecimalPowerTable * table,
     char * output_digits,
@@ -501,10 +517,12 @@ cudaError_t profile_decimal_convert(
     } while (0)
 
 // do binary splitting for N * 17 elements, where N is a power of 2
-cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr){
+cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr, uint32_t block_offset = 0, BatchMPArray *P_out = nullptr){
     if (context == nullptr || N <= 0 || (N & (N - 1)) != 0) {
         return cudaErrorInvalidValue;
     }
+    const uint32_t extra_common_limit = getenv("GPUPI_COMMON_FACTORS")
+        ? (uint32_t)strtoul(getenv("GPUPI_COMMON_FACTORS"), nullptr, 10) : 136;
     // pre-allocate workspace for the 2^28 case
     cudaError_t workspace_err = batch_mp_ensure_workspace(context, 6442450944ull);
     if (workspace_err != cudaSuccess) return workspace_err;
@@ -579,7 +597,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         false,
         profiler,
         [&]() {
-            construct_leaf_17<true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N);
+            construct_leaf_17<true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N, block_offset);
             cudaError_t kernel_err = cudaGetLastError();
             if (kernel_err != cudaSuccess) {
                 return kernel_err;
@@ -599,7 +617,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         false,
         profiler,
         [&]() {
-            construct_leaf_17<false><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16);
+            construct_leaf_17<false><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16, block_offset);
             cudaError_t kernel_err = cudaGetLastError();
             if (kernel_err != cudaSuccess) {
                 return kernel_err;
@@ -634,7 +652,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             r = r1 + r2*/
         const bool subtract = (n1 == (uint32_t)n) || (n1 == (n >> 4));
 
-        int ignore_last_P = n1 <= N;
+        int ignore_last_P = P_out == nullptr && n1 <= N;
 
         P_next.batch_size = n1 / 2 - ignore_last_P;
         P_next.length = P.length * 2;
@@ -653,12 +671,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             .stride = P.stride * 2
         };
 
-        if (P_odd.batch_size > 0) {
-            err = profile_mul(context, P_even, P_odd, P_next, "P", n1, profiler);
-            CHECK_AND_RETURN(err, release_all());
-            err = profile_compact(context, P_next, "P", n1, profiler);
-            CHECK_AND_RETURN(err, release_all());
-        }
 
         Q_next.batch_size = n1 / 2;
         Q_next.length = Q.length * 2;
@@ -676,10 +688,6 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             .batch_size = n1 / 2,
             .stride = Q.stride * 2
         };
-        err = profile_mul(context, Q_even, Q_odd, Q_next, "Q", n1, profiler);
-        CHECK_AND_RETURN(err, release_all());
-        err = profile_compact(context, Q_next, "Q", n1, profiler);
-        CHECK_AND_RETURN(err, release_all());
         BatchMPArray R_even = {
             .data = R.data,
             .length = R.length,
@@ -696,19 +704,51 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         R_prod_1.length = R.length + Q.length;
         R_prod_1.stride = R.length + Q.length;
 
-        err = profile_mul(context, R_even, Q_odd, R_prod_1, "R*Q", n1, profiler);
+        err = profile_stage("mul", "Q_and_RQ", n1, Q_even.batch_size,
+            Q_even.length, Q_odd.length, true, profiler, [&]() {
+                return batch_mp_mul_shared_b(context, Q_even, R_even, Q_odd, Q_next, R_prod_1);
+            });
+        CHECK_AND_RETURN(err, release_all());
+        err = profile_compact(context, Q_next, "Q", n1, profiler);
         CHECK_AND_RETURN(err, release_all());
 
-        int shift_amount = 15 * ((n / n1) + ((n / n1) >> 4));
+        uint32_t shift_amount = 15u * ((n / n1) + ((n / n1) >> 4));
 
         R_prod_2.batch_size = n1 / 2;
         R_prod_2.length = R.length + P.length;
         R_prod_2.stride = R.length + P.length;
 
+        const uint32_t p_rows = P_odd.batch_size;
         P_even.batch_size = n1 / 2;
-
-        err = profile_mul(context, P_even, R_odd, R_prod_2, "P*R", n1, profiler);
-        CHECK_AND_RETURN(err, release_all());
+        if (p_rows > 0 && !getenv("GPUPI_OLD_P_PAIR")) {
+            auto common = P_even, other = R_odd, product = R_prod_2;
+            common.batch_size = other.batch_size = product.batch_size = p_rows;
+            err = profile_stage("mul", "P_and_PR", n1, p_rows, P_odd.length,
+                common.length, true, profiler, [&]() {
+                    return batch_mp_mul_shared_b(context, P_odd, other, common, P_next, product);
+                });
+            CHECK_AND_RETURN(err, release_all());
+            if (p_rows < R_prod_2.batch_size) {
+                auto tail = [p_rows](BatchMPArray v) {
+                    v.data += (size_t)p_rows * v.stride; v.batch_size = 1; return v;
+                };
+                err = profile_mul(context, tail(P_even), tail(R_odd), tail(R_prod_2),
+                    "PR_tail", n1, profiler);
+                CHECK_AND_RETURN(err, release_all());
+            }
+        } else {
+            if (p_rows > 0) {
+                auto even = P_even; even.batch_size = p_rows;
+                err = profile_mul(context, even, P_odd, P_next, "P", n1, profiler);
+                CHECK_AND_RETURN(err, release_all());
+            }
+            err = profile_mul(context, P_even, R_odd, R_prod_2, "P*R", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+        }
+        if (p_rows > 0) {
+            err = profile_compact(context, P_next, "P", n1, profiler);
+            CHECK_AND_RETURN(err, release_all());
+        }
         const uint32_t shifted_r_prod_1_length = R_prod_1.length + (((uint32_t)shift_amount) >> 5) + ((shift_amount & 31) != 0);
         R_next.batch_size = n1 / 2;
         R_next.length = std::max(shifted_r_prod_1_length, R_prod_2.length) + (subtract ? 0 : 1);
@@ -782,7 +822,40 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             std::swap(Q, Q_next);
             std::swap(R, R_next);
         }
+        if (n1 <= (uint32_t)N && extra_common_limit >= 34) {
+            const uint64_t terms = (uint64_t)N * 34 / n1;
+            const uint32_t *factors = nullptr; size_t count = 0;
+            if (terms <= extra_common_limit) {
+                if (terms == 34) { factors = kCommon34; count = sizeof(kCommon34)/4; }
+                if (terms == 68) { factors = kCommon68; count = sizeof(kCommon68)/4; }
+                if (terms == 136) { factors = kCommon136; count = sizeof(kCommon136)/4; }
+            }
+            if (count) {
+                BatchMPArray arrays[] = {P, Q, R};
+                const char *labels[] = {"common_P", "common_Q", "common_R"};
+                for (int which = 0; which < 3; ++which) {
+                    if (!arrays[which].batch_size) continue;
+                    err = profile_stage("exactdiv", labels[which], n1,
+                        arrays[which].batch_size, arrays[which].length, (uint32_t)count,
+                        false, profiler, [&]() {
+                            return batch_mp_exactdiv_small_many(context, arrays[which], factors, (uint32_t)count);
+                        });
+                    CHECK_AND_RETURN(err, release_all());
+                }
+            }
+            if (count) {
+                if (P.batch_size) {
+                    err = profile_compact(context, P, "extra_P", n1, profiler);
+                    CHECK_AND_RETURN(err, release_all());
+                }
+                err = profile_compact(context, Q, "extra_Q", n1, profiler);
+                CHECK_AND_RETURN(err, release_all());
+                err = profile_compact(context, R, "extra_R", n1, profiler);
+                CHECK_AND_RETURN(err, release_all());
+            }
+        }
     }
+    if (P_out) { *P_out = P; P = {}; }
     release_array(P);
     release_array(P_next);
     release_array(Q_next);
@@ -814,6 +887,16 @@ bool parse_int_arg(const char * text, int * value) {
         return false;
     }
     *value = (int)parsed;
+    return true;
+}
+
+bool parse_digits_arg(const char *text, uint64_t *value) {
+    if (!text || !*text || *text == '-') return false;
+    errno = 0;
+    char *end = nullptr;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno || *end || parsed > 5000000000ull) return false;
+    *value = (uint64_t)parsed;
     return true;
 }
 
@@ -921,11 +1004,11 @@ bool print_fractional_preview_summary(const BatchMPArray &ret) {
     return true;
 }
 
-uint32_t round_up_decimal_digits(uint32_t requested_digits) {
+uint64_t round_up_decimal_digits(uint64_t requested_digits) {
     if (requested_digits == 0u) {
         return 0u;
     }
-    uint32_t digits = requested_digits;
+    uint64_t digits = requested_digits;
     uint32_t levels = 0;
     while (digits >= 32 * 18){
         digits = digits >> 1;
@@ -938,13 +1021,13 @@ uint32_t round_up_decimal_digits(uint32_t requested_digits) {
     return digits << levels;
 }
 
-uint32_t compute_prec_limbs_for_digits(uint32_t digits) {
-    const uint32_t prec_bits = (uint32_t)((double)digits * 3.322) + 31u;
+uint32_t compute_prec_limbs_for_digits(uint64_t digits) {
+    const uint64_t prec_bits = (uint64_t)((double)digits * 3.322) + 31u;
     // The 3.322 estimate supplies ample margin for large requests, but almost
     // none at small sizes. Allow for a partially filled leading denominator
     // limb, quotient truncation and the decimal converter's guard bits.
-    const uint32_t guarded_bits =
-        (uint32_t)ceil((double)digits * 3.32192809488736234787) + 128u;
+    const uint64_t guarded_bits =
+        (uint64_t)ceil((double)digits * 3.32192809488736234787) + 128u;
     return std::max(prec_bits / 32u + 1u, (guarded_bits + 31u) / 32u);
 }
 
@@ -952,14 +1035,14 @@ uint32_t limb_bit_length(uint32_t limb) {
     return limb == 0 ? 0u : 32u - (uint32_t)__builtin_clz(limb);
 }
 
-uint32_t compute_bit_length(const uint32_t * limbs, uint32_t length) {
+uint64_t compute_bit_length(const uint32_t * limbs, uint32_t length) {
     while (length > 0 && limbs[length - 1] == 0) {
         --length;
     }
     if (length == 0) {
         return 0;
     }
-    return (length - 1) * 32u + limb_bit_length(limbs[length - 1]);
+    return (uint64_t)(length - 1) * 32u + limb_bit_length(limbs[length - 1]);
 }
 
 cudaError_t copy_top_limb_to_host(const BatchMPArray & array, uint32_t * top_limb) {
@@ -973,7 +1056,7 @@ cudaError_t copy_top_limb_to_host(const BatchMPArray & array, uint32_t * top_lim
     return cudaMemcpy(top_limb, array.data + array.length - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
 }
 
-cudaError_t compact_and_compute_bit_length(BatchMPContext * context, BatchMPArray & array, uint32_t * bit_length) {
+cudaError_t compact_and_compute_bit_length(BatchMPContext * context, BatchMPArray & array, uint64_t * bit_length) {
     if (bit_length == nullptr) {
         return cudaErrorInvalidValue;
     }
@@ -990,7 +1073,7 @@ cudaError_t compact_and_compute_bit_length(BatchMPContext * context, BatchMPArra
     if (err != cudaSuccess) {
         return err;
     }
-    *bit_length = (array.length - 1) * 32u + limb_bit_length(top_limb);
+    *bit_length = (uint64_t)(array.length - 1) * 32u + limb_bit_length(top_limb);
     return cudaSuccess;
 }
 
@@ -1034,9 +1117,9 @@ bool print_sqrt_validation_summary(const BatchMPArray &P, const BatchMPArray &Q)
     const uint64_t norm_low64 = (uint64_t)((unsigned __int128)p_low64 * p_low64 - (unsigned __int128)10005u * q_low64 * q_low64);
 
     printf(
-        "validation P_bits=%u Q_bits=%u norm_mod_%u=%u norm_low64=0x%016llx expected_norm=1\n",
-        compute_bit_length(p_host, P.length),
-        compute_bit_length(q_host, Q.length),
+        "validation P_bits=%llu Q_bits=%llu norm_mod_%u=%u norm_low64=0x%016llx expected_norm=1\n",
+        (unsigned long long)compute_bit_length(p_host, P.length),
+        (unsigned long long)compute_bit_length(q_host, Q.length),
         kValidationMod,
         norm_mod,
         (unsigned long long)norm_low64
@@ -1076,7 +1159,7 @@ cudaError_t shift_right_large(
     uint64_t shift_bits,
     BatchMPArray B,
     const char * label = nullptr,
-    uint32_t digits = 0u,
+    uint64_t digits = 0u,
     StageProfiler * profiler = nullptr
 ) {
     const uint64_t limb_shift64 = shift_bits / 32u;
@@ -1186,7 +1269,7 @@ cudaError_t recursive_inverse(
     BatchMPArray x, // we must have x.batch_size == 1
     uint64_t L,
     BatchMPArray & y_out,
-    uint32_t digits,
+    uint64_t digits,
     StageProfiler * profiler
 ) {
     std::vector<uint64_t> levels;
@@ -1361,7 +1444,18 @@ cudaError_t recursive_inverse(
     return cudaSuccess;
 }
 
-cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q, StageProfiler * profiler = nullptr) {
+// P is odd and P^2 - 10005 Q^2 = 1. Thus the Pell doubling
+// recurrence is P' = 2 P^2 - 1; its subtraction cannot borrow beyond limb 0.
+__global__ void pell_double_square(const uint32_t *pp, uint32_t *out, uint32_t length) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i <= length;
+         i += (size_t)blockDim.x * gridDim.x) {
+        uint32_t value = (i < length ? pp[i] << 1 : 0) |
+            (i > 0 ? pp[i - 1] >> 31 : 0);
+        out[i] = value - (i == 0);
+    }
+}
+
+cudaError_t sqrt_10005(BatchMPContext * context, uint64_t target_digits, BatchMPArray & P, BatchMPArray & Q, StageProfiler * profiler = nullptr) {
     cudaError_t workspace_err = batch_mp_ensure_workspace(context, 6442450944ull >> 2);
     if (workspace_err != cudaSuccess) return workspace_err;
     /*
@@ -1372,15 +1466,15 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
     while valid_terms < target_digits:
         valid_terms *= 2
         p_15, q_15 = (
-            p_15 * p_15 + 10005 * q_15 * q_15,
+            2 * p_15 * p_15 - 1,
             p_15 * q_15 * 2,
         )
     */
     double log_p_15 = log(4001.0);
     double log_q_15 = log(40.0);
     double valid_digits = 7.5;
-    uint32_t total_work_memory = 0;
-    uint32_t P_memory = 0, Q_memory = 0;
+    size_t total_work_memory = 0;
+    size_t P_memory = 0, Q_memory = 0;
     if (valid_digits < target_digits){
         total_work_memory += 4;
         total_work_memory += 4;
@@ -1395,11 +1489,10 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
         log_q_15 = old_log_p_15 + old_log_q_15 + log(2.0);
         valid_digits *= 2;
         if (valid_digits < target_digits){
-            total_work_memory += (ceil(log_p_15 / log(2.0) / 32) * 4 + 8) * 4;
-            total_work_memory += (ceil(log_q_15 / log(2.0) / 32) * 4 + 8) * 2;
-        }else{
             total_work_memory += (ceil(log_p_15 / log(2.0) / 32) * 4 + 8) * 3;
             total_work_memory += (ceil(log_q_15 / log(2.0) / 32) * 4 + 8) * 1;
+        }else{
+            total_work_memory += (ceil(log_p_15 / log(2.0) / 32) * 4 + 8) * 2;
             P_memory = ceil(log_p_15 / log(2.0) / 32) * 4 + 8;
             Q_memory = ceil(log_q_15 / log(2.0) / 32) * 4 + 8;
         }
@@ -1451,7 +1544,7 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
     Q = {.data = cur_Q, .length = 1, .batch_size = 1, .stride = 1};
     while (valid_digits < target_digits){
         valid_digits *= 2;
-        const uint32_t stage_digits = (uint32_t)valid_digits;
+        const uint64_t stage_digits = (uint64_t)valid_digits;
         BatchMPArray next_PQ = {
             .data = cur_work_memory,
             .length = P.length + Q.length,
@@ -1493,34 +1586,11 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
         err = profile_compact(context, next_PP, "P*P", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
 
-        BatchMPArray next_QQ = {
-            .data = cur_work_memory,
-            .length = Q.length * 2,
-            .batch_size = 1,
-            .stride = Q.length * 2
-        };
-        cur_work_memory += next_QQ.length;
-        err = profile_mul(context, Q, Q, next_QQ, "Q*Q", stage_digits, profiler);
-        CHECK_AND_RETURN(err, release_all());
-        err = profile_compact(context, next_QQ, "Q*Q", stage_digits, profiler);
-        CHECK_AND_RETURN(err, release_all());
-
-        BatchMPArray next_QQ_10005 = {
-            .data = cur_work_memory,
-            .length = next_QQ.length + 1,
-            .batch_size = 1,
-            .stride = next_QQ.length + 1
-        };
-        cur_work_memory += next_QQ_10005.length;
-        err = profile_mul_small(context, next_QQ, 10005, next_QQ_10005, "10005*Q*Q", stage_digits, profiler);
-        CHECK_AND_RETURN(err, release_all());
-        err = profile_compact(context, next_QQ_10005, "10005*Q*Q", stage_digits, profiler);
-        CHECK_AND_RETURN(err, release_all());
         BatchMPArray next_P = {
             .data = nullptr,
-            .length = max(next_PP.length, next_QQ_10005.length) + 1,
+            .length = next_PP.length + 1,
             .batch_size = 1,
-            .stride = max(next_PP.length, next_QQ_10005.length) + 1
+            .stride = next_PP.length + 1
         };
         if (valid_digits < target_digits){
             next_P.data = cur_work_memory;
@@ -1528,7 +1598,12 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
         }else{
             next_P.data = d_P;
         }
-        err = profile_add(context, next_PP, next_QQ_10005, next_P, "P*P+10005*Q*Q", stage_digits, profiler);
+        err = profile_stage("shift", "2*P*P-1", stage_digits, 1, next_PP.length, 0,
+            false, profiler, [&]() {
+                pell_double_square<<<min((size_t)65536, ((size_t)next_PP.length + 256) / 256), 256>>>(
+                    next_PP.data, next_P.data, next_PP.length);
+                return cudaGetLastError();
+            });
         CHECK_AND_RETURN(err, release_all());
         err = profile_compact(context, next_P, "P", stage_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
@@ -1540,7 +1615,39 @@ cudaError_t sqrt_10005(BatchMPContext * context, int target_digits, BatchMPArray
     return cudaSuccess;
 }
 
-cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPArray & P, BatchMPArray & Q, BatchMPArray & P_base, BatchMPArray & Q_base, StageProfiler * profiler = nullptr) {
+// A two-subtree forest avoids rounding the entire term count up to the
+// next power of two. Both subtrees still use the tuned batched kernels.
+static cudaError_t binary_split_two(BatchMPContext *ctx, uint32_t left_blocks,
+    uint32_t right_blocks, BatchMPArray &Q, BatchMPArray &R, StageProfiler *profiler) {
+    BatchMPArray p{}, ql{}, rl{}, qr{}, rr{}, rq{}, pr{};
+    auto cleanup = [&]() {
+        for (auto a : {p, ql, rl, qr, rr, rq, pr}) batch_mp_array_release(a);
+    };
+    cudaError_t err = binary_split_batched(ctx, left_blocks, ql, rl, profiler, 0, &p);
+    CHECK_AND_RETURN(err, cleanup());
+    err = binary_split_batched(ctx, right_blocks, qr, rr, profiler, left_blocks);
+    CHECK_AND_RETURN(err, cleanup());
+    Q = batch_mp_array_create(1, ql.length + qr.length);
+    rq = batch_mp_array_create(1, rl.length + qr.length);
+    pr = batch_mp_array_create(1, p.length + rr.length);
+    if (!Q.data || !rq.data || !pr.data) { cleanup(); return cudaErrorMemoryAllocation; }
+    err = profile_stage("mul", "forest_Q_RQ", 2, 1, ql.length, qr.length, true,
+        profiler, [&]() { return batch_mp_mul_shared_b(ctx, ql, rl, qr, Q, rq); });
+    CHECK_AND_RETURN(err, cleanup());
+    err = profile_mul(ctx, p, rr, pr, "forest_PR", 2, profiler);
+    CHECK_AND_RETURN(err, cleanup());
+    uint32_t shift = right_blocks * 17u * 15u;
+    R = batch_mp_array_create(1, std::max(rq.length + (shift+31u)/32u, pr.length) + 1);
+    if (!R.data) { cleanup(); return cudaErrorMemoryAllocation; }
+    err = profile_shift_addsub(ctx, rq, pr, R, shift, (left_blocks & 1u) != 0, 2, profiler);
+    CHECK_AND_RETURN(err, cleanup());
+    err = Q.compact(ctx);
+    if (err == cudaSuccess) err = R.compact(ctx);
+    cleanup();
+    return err;
+}
+
+cudaError_t pi_fractional(BatchMPContext * context, uint64_t target_digits, BatchMPArray & P, BatchMPArray & Q, BatchMPArray & P_base, BatchMPArray & Q_base, StageProfiler * profiler = nullptr) {
     /*
     q, r = binary_split(0, N * 17, True)
     r = r >> (15 * (N * 17) - 8)
@@ -1562,7 +1669,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     while (N * 17 * 14.18 < working_digits) {
         N *= 2;
     }
-    int prec_limbs = (int)compute_prec_limbs_for_digits((uint32_t)target_digits);
+    int prec_limbs = (int)compute_prec_limbs_for_digits(target_digits);
     BatchMPArray Q_bs{}, R_bs{};
     BatchMPArray Q_scaled{};
     BatchMPArray R_shifted{};
@@ -1594,7 +1701,14 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         }
     };
 
-    cudaError_t err = binary_split_batched(context, N, Q_bs, R_bs, profiler);
+    uint32_t left_blocks = (uint32_t)N / 2, right_blocks = 1;
+    while (((double)left_blocks + right_blocks) * 17.0 * 14.18 < working_digits)
+        right_blocks *= 2;
+    bool forest = left_blocks > 0 && right_blocks < left_blocks && !getenv("GPUPI_SINGLE_TREE");
+    cudaError_t err = forest
+        ? binary_split_two(context, left_blocks, right_blocks, Q_bs, R_bs, profiler)
+        : binary_split_batched(context, N, Q_bs, R_bs, profiler);
+    if (forest) N = left_blocks + right_blocks;
     CHECK_AND_RETURN(err, release_all());
     long r_total_shift = 15ull * N * 17 - 8;
     // At small sizes, common-factor cancellation can leave Q shorter than
@@ -1609,8 +1723,8 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         if (Q_scaled.data == nullptr) {
             CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
         }
-        err = profile_shift_bits(context, Q_bs, Q_scaled, (int32_t)guard_scale_bits,
-            "Q_guard_scale", (uint32_t)target_digits, profiler);
+        err = profile_shift_bits(context, Q_bs, Q_scaled, (int64_t)guard_scale_bits,
+            "Q_guard_scale", target_digits, profiler);
         CHECK_AND_RETURN(err, release_all());
         release_array(&Q_bs);
         Q_bs = Q_scaled;
@@ -1630,7 +1744,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     if (R_shifted.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
-    err = profile_shift_bits(context, R_preshift, R_shifted, -r_total_shift_bits, "R_shift", (uint32_t)target_digits, profiler);
+    err = profile_shift_bits(context, R_preshift, R_shifted, -r_total_shift_bits, "R_shift", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
     batch_mp_array_release(R_bs);
     R_bs = {};
@@ -1651,7 +1765,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         .stride = R_shifted.length - extra_limbs
     };
 
-    err = sqrt_10005(context, (int)working_digits, P_15, Q_15, profiler);
+    err = sqrt_10005(context, (uint64_t)working_digits, P_15, Q_15, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     P_final = batch_mp_array_create(1, P_15.length + Q_truncated.length);
@@ -1660,14 +1774,14 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
 
-    err = profile_mul(context, P_15, Q_truncated, P_final, "P15*Q", (uint32_t)target_digits, profiler);
+    err = profile_mul(context, P_15, Q_truncated, P_final, "P15*Q", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
-    err = profile_mul(context, R_truncated, Q_15, Q_final, "R*Q15", (uint32_t)target_digits, profiler);
+    err = profile_mul(context, R_truncated, Q_15, Q_final, "R*Q15", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
-    err = profile_compact(context, P_final, "P", (uint32_t)target_digits, profiler);
+    err = profile_compact(context, P_final, "P", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
-    err = profile_compact(context, Q_final, "Q", (uint32_t)target_digits, profiler);
+    err = profile_compact(context, Q_final, "Q", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     release_array(&Q_bs);
@@ -1679,7 +1793,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     P_truncated_final = make_subview(P_final, (uint32_t)extra_limbs, P_final.length - (uint32_t)extra_limbs);
     Q_truncated_final = make_subview(Q_final, (uint32_t)extra_limbs, Q_final.length - (uint32_t)extra_limbs);
 
-    uint32_t q_bits_count_u32 = 0u;
+    uint64_t q_bits_count_u32 = 0u;
     err = compact_and_compute_bit_length(context, Q_truncated_final, &q_bits_count_u32);
     CHECK_AND_RETURN(err, release_all());
 
@@ -1687,7 +1801,7 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     const uint64_t inverse_bits = q_bits_count * 2u - 1u;
 
     // recursive_inverse owns allocation of its output.
-    err = recursive_inverse(context, Q_truncated_final, inverse_bits, inv_q_final, (uint32_t)target_digits, profiler);
+    err = recursive_inverse(context, Q_truncated_final, inverse_bits, inv_q_final, target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     release_array(&Q_final);
@@ -1696,9 +1810,9 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     if (ret_product.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
-    err = profile_mul(context, P_truncated_final, inv_q_final, ret_product, "P*invQ", (uint32_t)target_digits, profiler);
+    err = profile_mul(context, P_truncated_final, inv_q_final, ret_product, "P*invQ", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
-    err = profile_compact(context, ret_product, "P*invQ", (uint32_t)target_digits, profiler);
+    err = profile_compact(context, ret_product, "P*invQ", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
     release_array(&P_final);
@@ -1713,14 +1827,14 @@ cudaError_t pi_fractional(BatchMPContext * context, int target_digits, BatchMPAr
     const uint64_t result_bits = (uint64_t)prec_limbs * 32u;
     if (inverse_bits >= result_bits) {
         err = shift_right_large(context, ret_product, inverse_bits - result_bits,
-            ret_final, "RET_shift", (uint32_t)target_digits, profiler);
+            ret_final, "RET_shift", target_digits, profiler);
     } else {
         // Very small requests can need a left shift after normalization.
         err = profile_shift_bits(context, ret_product, ret_final,
-            (int32_t)(result_bits - inverse_bits), "RET_shift", (uint32_t)target_digits, profiler);
+            (int64_t)(result_bits - inverse_bits), "RET_shift", target_digits, profiler);
     }
     CHECK_AND_RETURN(err, release_all());
-    err = profile_compact(context, ret_final, "RET", (uint32_t)target_digits, profiler);
+    err = profile_compact(context, ret_final, "RET", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
     release_array(&ret_product);
 
@@ -1858,7 +1972,7 @@ int main_bs(int argc, char ** argv){
                 total_ntt_ms += entry.elapsed_ms;
             }
             printf(
-                "stage[%03d] kind=%8s label=%14s n1=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
+                "stage[%03d] kind=%8s label=%14s n1=%8" PRIu64 " batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
                 idx,
                 entry.kind,
                 entry.label,
@@ -1933,8 +2047,8 @@ int main_bs(int argc, char ** argv){
 }
 
 int main_sqrt_10005(int argc, char ** argv){
-    int target_digits = 0;
-    if (argc < 2 || !parse_int_arg(argv[1], &target_digits) || target_digits < 0) {
+    uint64_t target_digits = 0;
+    if (argc < 2 || !parse_digits_arg(argv[1], &target_digits)) {
         fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages]\n", argv[0]);
         return 1;
     }
@@ -2006,7 +2120,7 @@ int main_sqrt_10005(int argc, char ** argv){
 
     if (benchmark_only) {
         printf(
-            "target_digits=%d RET_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%" PRIu64 " RET_len=%u Q_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
             target_digits,
             P.length,
             Q.length,
@@ -2049,7 +2163,7 @@ int main_sqrt_10005(int argc, char ** argv){
                 total_compact_ms += entry.elapsed_ms;
             }
             printf(
-                "stage[%03d] kind=%9s label=%18s digits=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
+                "stage[%03d] kind=%9s label=%18s digits=%8" PRIu64 " batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
                 idx,
                 entry.kind,
                 entry.label,
@@ -2072,7 +2186,7 @@ int main_sqrt_10005(int argc, char ** argv){
             total_ntt_ms
         );
         printf(
-            "target_digits=%d RET_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%" PRIu64 " RET_len=%u Q_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
             target_digits,
             P.length,
             Q.length,
@@ -2093,7 +2207,7 @@ int main_sqrt_10005(int argc, char ** argv){
     }
 
     printf(
-        "target_digits=%d P_len=%u Q_len=%u elapsed_ms=%.3f\n",
+        "target_digits=%" PRIu64 " P_len=%u Q_len=%u elapsed_ms=%.3f\n",
         target_digits,
         P.length,
         Q.length,
@@ -2119,16 +2233,16 @@ int main_sqrt_10005(int argc, char ** argv){
 }
 
 int main_fractional(int argc, char ** argv){
-    int target_digits = 0;
-    if (argc < 2 || !parse_int_arg(argv[1], &target_digits) || target_digits < 0) {
+    uint64_t target_digits = 0;
+    if (argc < 2 || !parse_digits_arg(argv[1], &target_digits)) {
         fprintf(stderr, "Usage: %s <target_digits> [--benchmark|--profile-stages|--full-print]\n", argv[0]);
         return 1;
     }
-    const uint32_t requested_digits = (uint32_t)target_digits;
-    const uint32_t convert_digits = round_up_decimal_digits(requested_digits);
+    const uint64_t requested_digits = target_digits;
+    const uint64_t convert_digits = round_up_decimal_digits(requested_digits);
     const uint32_t prec_limbs = compute_prec_limbs_for_digits(requested_digits);
     if (requested_digits > 0u && convert_digits == 0u) {
-        fprintf(stderr, "Unsupported target_digits=%d\n", target_digits);
+        fprintf(stderr, "Unsupported target_digits=%" PRIu64 "\n", target_digits);
         return 1;
     }
     bool benchmark_only = false;
@@ -2180,10 +2294,10 @@ int main_fractional(int argc, char ** argv){
 
     const uint32_t decimal_levels = (convert_digits == 0u)
         ? 0u
-        : (uint32_t)__builtin_ctz(convert_digits / kDecimalLeafDigits);
+        : (uint32_t)__builtin_ctzll(convert_digits / kDecimalLeafDigits);
 
     if (!check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)") ||
-        !check_cuda(pi_fractional(context, (int)requested_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
+        !check_cuda(pi_fractional(context, requested_digits, P, Q, P_base, Q_base, profile_stages ? &profiler : nullptr), "pi_fractional") ||
         !check_cuda(profile_decimal_precompute_powers(
                 context,
                 &decimal_powers,
@@ -2213,7 +2327,7 @@ int main_fractional(int argc, char ** argv){
         if (!check_cuda(profile_decimal_convert(
                 context,
                 fractional_bits,
-                prec_limbs * 32u,
+                (uint64_t)prec_limbs * 32u,
                 convert_digits,
                 kDecimalLeafDigits,
                 &decimal_powers,
@@ -2264,7 +2378,7 @@ int main_fractional(int argc, char ** argv){
 
     if (benchmark_only) {
         printf(
-            "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%" PRIu64 " convert_digits=%" PRIu64 " RET_len=%u elapsed_ms=%.3f workspace_max=%dMB\n",
             requested_digits,
             convert_digits,
             P.length,
@@ -2279,8 +2393,8 @@ int main_fractional(int argc, char ** argv){
             return 1;
         }
         if (requested_digits > 0u) {
-            const uint32_t prefix_frac = std::min<uint32_t>(requested_digits, 63u);
-            const uint32_t suffix_frac = std::min<uint32_t>(requested_digits, 64u);
+            const uint32_t prefix_frac = std::min<uint64_t>(requested_digits, 63u);
+            const uint32_t suffix_frac = std::min<uint64_t>(requested_digits, 64u);
             char prefix[65] = {};
             char suffix[65] = {};
             prefix[0] = '3';
@@ -2342,7 +2456,7 @@ int main_fractional(int argc, char ** argv){
                 total_decimal_convert_ms += entry.elapsed_ms;
             }
             printf(
-                "stage[%03d] kind=%9s label=%18s digits=%8u batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
+                "stage[%03d] kind=%9s label=%18s digits=%8" PRIu64 " batch=%8u lhs_len=%9u rhs_len=%9u kernel_ms=%6.3f uses_ntt=%d\n",
                 idx,
                 entry.kind,
                 entry.label,
@@ -2380,7 +2494,7 @@ int main_fractional(int argc, char ** argv){
             total_decimal_powers_ms +
             total_decimal_convert_ms;
         printf(
-            "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
+            "target_digits=%" PRIu64 " convert_digits=%" PRIu64 " RET_len=%u elapsed_ms=%.3f accounted_ms=%.3f workspace_max=%dMB\n",
             requested_digits,
             convert_digits,
             P.length,
@@ -2396,7 +2510,7 @@ int main_fractional(int argc, char ** argv){
             return 1;
         }
         if (requested_digits > 0u) {
-            const uint32_t copy_digits = std::min<uint32_t>(requested_digits, 4096u);
+            const uint32_t copy_digits = std::min<uint64_t>(requested_digits, 4096u);
             std::vector<char> decimal_preview(copy_digits);
             if (!check_cuda(cudaMemcpy(decimal_preview.data(), d_decimal_digits, copy_digits, cudaMemcpyDeviceToHost), "cudaMemcpy(decimal_preview)")) {
                 release_decimal();
@@ -2416,12 +2530,15 @@ int main_fractional(int argc, char ** argv){
 
     fprintf(
         stderr,
-        "target_digits=%u convert_digits=%u RET_len=%u elapsed_ms=%.3f\n",
+        "target_digits=%" PRIu64 " convert_digits=%" PRIu64 " RET_len=%u elapsed_ms=%.3f\n",
         requested_digits,
         convert_digits,
         P.length,
         elapsed_ms
     );
+    // No more arithmetic is needed while the output is streamed.
+    batch_mp_destroy(context);
+    context = nullptr;
     if (full_print) {
         if (!print_full_hex_value("RET", P)) {
             release_decimal();

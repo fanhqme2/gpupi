@@ -27,7 +27,7 @@ __global__ __launch_bounds__(kBlockThreads, 2) void batch_shift_kernel(
     uint32_t L_out,
     uint32_t stride_in,
     uint32_t stride_out,
-    int32_t shift_bits,
+    int64_t shift_bits,
     uint64_t total_output_limbs
 ) {
     const uint64_t thread_linear = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -49,8 +49,8 @@ __global__ __launch_bounds__(kBlockThreads, 2) void batch_shift_kernel(
             uint32_t * b_row = B + (size_t)row_idx * stride_out;
 
             if (shift_bits >= 0) {
-                const uint32_t shift = (uint32_t)shift_bits;
-                const uint32_t word_shift = shift >> 5;
+                const uint64_t shift = (uint64_t)shift_bits;
+                const uint64_t word_shift = shift >> 5;
                 const uint32_t bit_shift = shift & 31u;
                 uint32_t result = 0u;
                 if (out_idx >= word_shift) {
@@ -65,10 +65,10 @@ __global__ __launch_bounds__(kBlockThreads, 2) void batch_shift_kernel(
                 }
                 b_row[out_idx] = result;
             } else {
-                const uint32_t shift = (uint32_t)(-shift_bits);
-                const uint32_t word_shift = shift >> 5;
+                const uint64_t shift = 0ull - (uint64_t)shift_bits;
+                const uint64_t word_shift = shift >> 5;
                 const uint32_t bit_shift = shift & 31u;
-                const uint32_t src_lo = out_idx + word_shift;
+                const uint64_t src_lo = out_idx + word_shift;
                 uint32_t result = 0u;
                 if (src_lo < L_in) {
                     const uint32_t lo = load_limb_or_zero(a_row, src_lo, L_in);
@@ -95,7 +95,7 @@ void batch_shift_bits(
     uint32_t L_out,
     uint32_t stride_in,
     uint32_t stride_out,
-    int32_t shift_bits
+    int64_t shift_bits
 ) {
     if (N == 0 || L_out == 0) {
         return;

@@ -30,20 +30,20 @@ struct ArrayOwner {
     }
 };
 
-uint32_t ceil_div_u32(uint32_t a, uint32_t b) {
+uint32_t ceil_div_u32(uint64_t a, uint32_t b) {
     return (a + b - 1u) / b;
 }
 
-uint32_t bits_for_digits(uint32_t digits) {
+uint64_t bits_for_digits(uint64_t digits) {
     const double bits = std::ceil((double)digits * kLog2_10) + (double)kPrecisionMarginBits;
-    return (uint32_t)bits;
+    return (uint64_t)bits;
 }
 
-uint32_t levels_for_shape(uint32_t total_digits, uint32_t leaf_digits) {
+uint32_t levels_for_shape(uint64_t total_digits, uint32_t leaf_digits) {
     if (leaf_digits == 0u || total_digits == 0u || (total_digits % leaf_digits) != 0u) {
         return UINT32_MAX;
     }
-    uint32_t ratio = total_digits / leaf_digits;
+    uint64_t ratio = total_digits / leaf_digits;
     uint32_t levels = 0u;
     while (ratio > 1u && (ratio & 1u) == 0u) {
         ratio >>= 1u;
@@ -73,7 +73,7 @@ __global__ void extract_shifted_rows_kernel(
     uint32_t dst_stride,
     uint32_t dst_length,
     uint32_t rows,
-    uint32_t shift_bits,
+    uint64_t shift_bits,
     uint32_t dst_row_offset
 ) {
     const uint64_t total = (uint64_t)rows * (uint64_t)dst_length;
@@ -140,7 +140,7 @@ cudaError_t launch_extract_shifted_rows(
     const BatchMPArray & src,
     BatchMPArray & dst,
     uint32_t rows,
-    uint32_t shift_bits,
+    uint64_t shift_bits,
     uint32_t dst_row_offset
 ) {
     if (dst.length == 0u || rows == 0u) {
@@ -159,7 +159,7 @@ cudaError_t launch_extract_low_bits_rows(
     const BatchMPArray & src,
     BatchMPArray & dst,
     uint32_t rows,
-    uint32_t valid_bits
+    uint64_t valid_bits
 ) {
     if (dst.length == 0u || rows == 0u) {
         return cudaSuccess;
@@ -286,8 +286,8 @@ void convert_decimal_release_powers(ConvertDecimalPowerTable * table) {
 cudaError_t convert_decimal_equal_split(
     BatchMPContext * ctx,
     BatchMPArray input,
-    uint32_t input_bits,
-    uint32_t total_digits,
+    uint64_t input_bits,
+    uint64_t total_digits,
     uint32_t leaf_digits,
     const ConvertDecimalPowerTable * table,
     char * output_digits
@@ -300,8 +300,8 @@ cudaError_t convert_decimal_equal_split(
         return cudaErrorInvalidValue;
     }
 
-    std::vector<uint32_t> digits_per_level(levels + 1u);
-    std::vector<uint32_t> bits_per_level(levels + 1u);
+    std::vector<uint64_t> digits_per_level(levels + 1u);
+    std::vector<uint64_t> bits_per_level(levels + 1u);
     std::vector<uint32_t> limbs_per_level(levels + 1u);
     digits_per_level[0] = total_digits;
     bits_per_level[0] = input_bits;
@@ -349,7 +349,7 @@ cudaError_t convert_decimal_equal_split(
     };
 
     if (levels == 0u) {
-        const uint32_t leaf_bits_needed = bits_for_digits(total_digits);
+        const uint64_t leaf_bits_needed = bits_for_digits(total_digits);
         const uint32_t leaf_limbs_needed = ceil_div_u32(leaf_bits_needed, 32u);
         if (input_bits < leaf_bits_needed) {
             return cudaErrorInvalidValue;
@@ -368,9 +368,9 @@ cudaError_t convert_decimal_equal_split(
         own_current = true;
     } else {
         for (uint32_t level = 0u; level < levels; ++level) {
-            const uint32_t child_digits = digits_per_level[level + 1u];
-            const uint32_t child_bits = bits_per_level[level + 1u];
-            const uint32_t half_digits = child_digits;
+            const uint64_t child_digits = digits_per_level[level + 1u];
+            const uint64_t child_bits = bits_per_level[level + 1u];
+            const uint64_t half_digits = child_digits;
             if (current.length < limbs_per_level[level]) {
                 cleanup_current();
                 return cudaErrorInvalidValue;
@@ -395,7 +395,7 @@ cudaError_t convert_decimal_equal_split(
                 return err;
             }
 
-            const uint32_t mantissa_bits = bits_per_level[level] - half_digits;
+            const uint64_t mantissa_bits = bits_per_level[level] - half_digits;
             const uint32_t mantissa_limbs = ceil_div_u32(mantissa_bits, 32u);
             ArrayOwner mantissa{{arena.array.data + next_words * 2u,
                 mantissa_limbs, current.batch_size, mantissa_limbs}, false};
@@ -450,7 +450,7 @@ cudaError_t convert_decimal_equal_split(
         cleanup_current();
         return cudaErrorMemoryAllocation;
     }
-    const uint32_t leaf_bits = (levels == 0u) ? bits_for_digits(total_digits) : bits_per_level[levels];
+    const uint64_t leaf_bits = (levels == 0u) ? bits_for_digits(total_digits) : bits_per_level[levels];
     const uint32_t align_shift = current.length * 32u - leaf_bits;
     cudaError_t err = batch_mp_shift_bits(ctx, current, aligned.array, (int32_t)align_shift);
     if (err != cudaSuccess) {

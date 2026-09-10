@@ -519,6 +519,7 @@ static void benchmark_configuration(uint32_t L_a, uint32_t L_b, uint64_t target_
 
 int main(int argc, char **argv) {
     const bool skip_benchmark = argc == 2 && std::strcmp(argv[1], "--skip-benchmark") == 0;
+    const bool broadcast_only = argc == 2 && std::strcmp(argv[1], "--broadcast-only") == 0;
     std::mt19937_64 rng(100ull);
     bool all_passed = true;
     const uint64_t target_NL = 100000000ull; // keep N * L_a around 1e8
@@ -539,10 +540,28 @@ int main(int argc, char **argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     printf("=== Correctness Tests ===\n\n");
+    if (broadcast_only) goto broadcast_tests;
+    for (uint32_t k = 14; k <= 24 && all_passed; ++k) {
+        uint32_t K = 1u << k;
+        for (uint32_t extra : {1u, 2u, 31u, 32u, 33u, K / 32, K / 8}) {
+            uint32_t a = K / 2, b = K / 2 + extra;
+            all_passed = test_configuration(3u, a, b, tables, rng, true, false, false, true) && all_passed;
+            all_passed = test_configuration(3u, a, b, tables, rng, true, false, true, false) && all_passed;
+            if (!all_passed) goto done;
+        }
+        all_passed = test_configuration(3u, K/2+K/64, K/2+K/64, tables, rng, true, true) && all_passed;
+    }
+    // Cross the workspace batch boundary and use the one-block carry path.
+    for (uint32_t extra : {1u, 33u, 512u}) {
+        all_passed = test_configuration(1025u, 8192u, 8192u+extra, tables, rng, true, false, true, true) && all_passed;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--cyclic-only") == 0) goto done;
 
+
+broadcast_tests:
     // Exercise small/medium transform schedules, identical operand pointers,
     // broadcast rows, carry chains, and multiple workspace-sized batches.
-    for (uint32_t k = 13; k <= 24 && all_passed; ++k) {
+    for (uint32_t k = 6; k <= 24 && all_passed; ++k) {
         const uint32_t limbs = (1u << (k - 1)) - 3u;
         all_passed = test_configuration(3u, limbs, limbs, tables, rng, true, true);
         all_passed = test_configuration(3u, limbs, limbs - 7u, tables, rng,
@@ -550,6 +569,14 @@ int main(int argc, char **argv) {
     }
     all_passed = test_configuration(1025u, 4093u, 4093u, tables, rng,
         true, true, false, true) && all_passed;
+    all_passed = test_configuration(1025u, 4093u, 4093u, tables, rng,
+        true, false, true, true) && all_passed;
+    if (broadcast_only) {
+        for (uint32_t extra : {1u, 33u, 512u})
+            all_passed = test_configuration(1025u, 8192u, 8192u+extra, tables, rng,
+                true, false, true, true) && all_passed;
+        goto done;
+    }
     if (!all_passed) goto done;
 
     all_passed = run_suite("Small size tests (N*(L_a+L_b) <= 16384):", 16384, 12, false, tables, rng) && all_passed;

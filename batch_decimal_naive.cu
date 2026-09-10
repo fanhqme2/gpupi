@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 
 #include "batch_decimal_naive.h"
 #include "batch_mul_addsub_warp.h"
@@ -175,6 +176,79 @@ __global__ void batch_decimal_naive_kernel2(
     }
 }
 
+__global__ void batch_decimal_naive_warps(
+    const uint32_t * A,
+    char * B,
+    uint32_t N,
+    int L_limb,
+    uint32_t stride_A,
+    int L_dec,
+    uint32_t stride_B
+) {
+    uint32_t read_word = 0;
+    const int my_idx = threadIdx.x & 31;
+    for (uint32_t idx = blockIdx.x * 8u + threadIdx.x / 32u; idx < N; idx += gridDim.x * 8u) {
+        uint32_t val0 = 0;
+        uint32_t val1 = 0;
+        uint32_t val0_2 = 0;
+        uint32_t val1_2 = 0;
+        uint32_t carry = 0;
+        uint32_t carry_2 = 0;
+        uint32_t ret = 0;
+        uint32_t ret_2 = 0;
+
+        for (int i = 0; i < ((L_limb + 2) >> 1) + ((L_dec + 17) / 18); i ++){
+            uint32_t send_val0 = ((i - 1 - my_idx) * 2 < L_limb) ? val0_2 : 0;
+            uint32_t send_val1 = ((i - 1 - my_idx) * 2 + 1 < L_limb) ? val1_2 : 0;
+            val0 = cuda::device::warp_shuffle_up(send_val0, 1);
+            val1 = cuda::device::warp_shuffle_up(send_val1, 1);
+
+            if ((i & 15) == 0)
+                read_word = i * 2 + my_idx < L_limb ? A[(size_t)idx * stride_A + i * 2 + my_idx] : 0;
+            uint32_t in0 = __shfl_sync(0xffffffffu, read_word, (i & 15) * 2);
+            uint32_t in1 = __shfl_sync(0xffffffffu, read_word, (i & 15) * 2 + 1);
+            if (my_idx == 0) { val0 = in0; val1 = in1; }
+
+            uint64_t mul0 = (uint64_t)val0 * 1000000000ULL + carry;
+            uint64_t mul1 = (uint64_t)val1 * 1000000000ULL + (mul0 >> 32);
+            carry = mul1 >> 32;
+            val0 = (uint32_t)mul0;
+            val1 = (uint32_t)mul1;
+
+            mul0 = (uint64_t)((i - my_idx) * 2 < L_limb ? val0 : 0) * 1000000000ULL + carry_2;
+            mul1 = (uint64_t)((i - my_idx) * 2 + 1 < L_limb ? val1 : 0) * 1000000000ULL + (mul0 >> 32);
+            carry_2 = mul1 >> 32;
+            val0_2 = (uint32_t)mul0;
+            val1_2 = (uint32_t)mul1;
+
+            if ((i - my_idx) * 2 == L_limb){
+                ret = val0;
+                ret_2 = val0_2;
+            }
+            if ((i - my_idx) * 2 + 1 == L_limb){
+                ret = val1;
+                ret_2 = val1_2;
+            }
+        }
+        for (int i = 0; i < 9; i ++){
+            char digit = '0' + ret % 10u;
+            ret /= 10;
+            const int out_pos = L_dec - (my_idx * 2 + 1) * 9 + i;
+            if (out_pos >= 0 && out_pos < L_dec){
+                B[(size_t)idx * stride_B + out_pos] = digit;
+            }
+        }
+        for (int i = 0; i < 9; i ++){
+            char digit = '0' + ret_2 % 10u;
+            ret_2 /= 10;
+            const int out_pos = L_dec - (my_idx * 2 + 2) * 9 + i;
+            if (out_pos >= 0 && out_pos < L_dec){
+                B[(size_t)idx * stride_B + out_pos] = digit;
+            }
+        }
+    }
+}
+
 }  // namespace
 
 void batch_decimal_naive(
@@ -193,6 +267,12 @@ void batch_decimal_naive(
     assert(stride_A >= (uint32_t)L_limb);
     assert(stride_B >= (uint32_t)L_dec);
     assert(L_limb <= kDecimalNaiveLimbMax);
+
+    if (L_dec <= 576 && !std::getenv("GPUPI_OLD_DECIMAL")) {
+        batch_decimal_naive_warps<<<std::min<uint32_t>((N+7)/8,65535),256>>>(
+            A,B,N,L_limb,stride_A,L_dec,stride_B);
+        return;
+    }
 
     if (L_dec > 18 * 1024){
         const int threads_needed = (L_limb / 2) + 1;

@@ -17,7 +17,7 @@ void batch_shift_bits(
     uint32_t L_out,
     uint32_t stride_in,
     uint32_t stride_out,
-    int32_t shift_bits
+    int64_t shift_bits
 );
 
 inline void batch_shift_left(
@@ -28,9 +28,9 @@ inline void batch_shift_left(
     uint32_t L_out,
     uint32_t stride_in,
     uint32_t stride_out,
-    uint32_t shift_bits
+    uint64_t shift_bits
 ) {
-    batch_shift_bits(A, B, N, L_in, L_out, stride_in, stride_out, (int32_t)shift_bits);
+    batch_shift_bits(A, B, N, L_in, L_out, stride_in, stride_out, (int64_t)shift_bits);
 }
 
 inline void batch_shift_right(
@@ -41,7 +41,7 @@ inline void batch_shift_right(
     uint32_t L_out,
     uint32_t stride_in,
     uint32_t stride_out,
-    uint32_t shift_bits
+    uint64_t shift_bits
 ) {
-    batch_shift_bits(A, B, N, L_in, L_out, stride_in, stride_out, -(int32_t)shift_bits);
+    batch_shift_bits(A, B, N, L_in, L_out, stride_in, stride_out, -(int64_t)shift_bits);
 }

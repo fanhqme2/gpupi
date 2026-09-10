@@ -33,8 +33,8 @@ void convert_decimal_release_powers(ConvertDecimalPowerTable * table);
 cudaError_t convert_decimal_equal_split(
     BatchMPContext * ctx,
     BatchMPArray input,
-    uint32_t input_bits,
-    uint32_t total_digits,
+    uint64_t input_bits,
+    uint64_t total_digits,
     uint32_t leaf_digits,
     const ConvertDecimalPowerTable * table,
     char * output_digits

@@ -66,7 +66,7 @@ cudaError_t batch_mp_mul_small(
 
 // Divide N large integers in place by one shared odd uint32_t divisor.
 // Exact division is required for every batch item.
-// Returns cudaErrorInvalidValue if A is invalid, B is even/zero, or A.length > 128.
+// Returns cudaErrorInvalidValue if A is invalid, B is even/zero, or A.length > 2048.
 cudaError_t batch_mp_exactdiv_small(
     BatchMPContext * ctx,
     BatchMPArray A,
@@ -137,14 +137,14 @@ cudaError_t batch_mp_shift_bits(
     BatchMPContext * ctx,
     BatchMPArray A,
     BatchMPArray B,
-    int32_t shift_bits
+    int64_t shift_bits
 );
 
 // Compute the maximum bitlength among N large integers.
 cudaError_t batch_mp_bitlength_max(
     BatchMPContext * ctx,
     BatchMPArray A,
-    uint32_t * result
+    uint64_t * result
 );
 
 // Compute the maximum non-zero limb count among N large integers.
@@ -153,3 +153,13 @@ cudaError_t batch_mp_limblength_max(
     BatchMPArray A,
     uint32_t * result
 );
+
+// Compute out_a = A*B and out_c = C*B, reusing B's NTT when shapes permit.
+// All arrays must have the same batch size; outputs must not alias inputs.
+cudaError_t batch_mp_mul_shared_b(BatchMPContext *ctx, BatchMPArray A,
+    BatchMPArray C, BatchMPArray B, BatchMPArray out_a, BatchMPArray out_c);
+
+// Exact division by the product of up to 32 odd, nonzero host-side divisors.
+// The input length limit is the same as batch_mp_exactdiv_small.
+cudaError_t batch_mp_exactdiv_small_many(BatchMPContext *ctx, BatchMPArray A,
+    const uint32_t *divisors, uint32_t count);

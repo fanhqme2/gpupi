@@ -20,7 +20,11 @@ void init_ntt_precomputed_tables(NTTPrecomputedTables * tables);
 // workspace : device memory pointer for temporary storage,
 //             must be at least batch_mul_ntt_workspace_size(N, L_a, L_b) bytes
 // we must have L_a <= stride_A, L_b <= stride_B, L_a + L_b <= stride_ret,
-// ((size_t)L_a) + L_b <= 2^32, and N much smaller than 2^32
+// Product length is supported through 2^31 limbs (tested with maximal limbs).
+// The modulus p = 2^96 - 2^32 + 1 exceeds every exact coefficient:
+// c_i <= min(L_a, L_b) * (2^32 - 1)^2 < 2^94 for L_a + L_b <= 2^31.
+// Thus 32-bit chunks remain exact at this size; smaller chunks / CRT are not
+// required. Bit counts and byte offsets must nevertheless use 64-bit types.
 void batch_mul_ntt(
     uint32_t * A,
     uint32_t * B,
@@ -38,3 +42,14 @@ void batch_mul_ntt(
 // compute the workspace size needed for batch_mul_ntt
 // returns the size in bytes
 size_t batch_mul_ntt_workspace_size(uint32_t N, uint32_t L_a, uint32_t L_b);
+
+struct NTTProduct {
+    uint32_t *input, *output;
+    uint32_t length, stride_input, stride_output;
+};
+
+// Returns zero when the shapes cannot share a transform efficiently.
+size_t batch_mul_ntt_shared_b_workspace_size(uint32_t N, uint32_t La, uint32_t Lc, uint32_t Lb);
+// Requires a nonzero shared workspace size and nonaliasing output arrays.
+void batch_mul_ntt_shared_b(NTTProduct a, NTTProduct c, uint32_t *B, uint32_t Lb,
+    uint32_t sb, uint32_t N, uint32_t *workspace, NTTPrecomputedTables tables);

@@ -9,7 +9,7 @@
 // We must have L <= stride_A.
 // workspace must be at least batch_bitlength_workspace_size(...) bytes
 // when the returned size is non-zero.
-uint32_t batch_bitlength_max(
+uint64_t batch_bitlength_max(
     const uint32_t * A,
     uint32_t * workspace,
     uint32_t N,
