@@ -16,42 +16,87 @@ make -j8 CUDA_ARCH=sm_120
 ./pi_mgpu 100000000000 > pi-100b.txt
 ```
 
-The 100b extension passed a complete byte comparison against y-cruncher.
-The final build computes **100 billion digits in 626.418 s**
-(10.44 minutes), measured in one run with automatic defaults and
-profiling disabled; complete benchmark-process time was 648.648 s.
-Computation timing includes reservation and decimal conversion, but excludes
-context startup, output writing, verification, and teardown. The full
-verification run peaked at **1.182 TB of host memory**, with sampled GPU
-peaks up to 85.884 GiB per card. Verified output is saved on the server at
-`~/work/gpupi/batchmp3/results/pi-100b.txt`. See
-[the benchmark record](benchmark_mgpu_100b.json) and
-[100b validation](validation/100b/README.md). The tested lower-memory schedule
-uses about 742 GB of host memory; details are in [MULTI_GPU.md](MULTI_GPU.md).
+## Multi-GPU results: 10b through 100b
 
-The 50b release, before the 100b extension, completes **50 billion digits in 199.71 s median** on the
-eight-GPU server (three serial trials; 211.81 s median complete process).
-All 50 billion digits match y-cruncher byte for byte, and the verified output
-is saved on the server at `~/work/gpupi/batchmp3/results/pi-50b.txt`.
-Raw measurements are in [benchmark_mgpu_50b.json](benchmark_mgpu_50b.json).
+All four sizes have been compared **byte for byte against independently
+computed y-cruncher references** on the eight-GPU server (eight 96 GB cards
+and approximately 2 TB of host RAM). Timings below are in seconds.
 
-The original 10b/25b release gave these medians from three serial trials on
-the supplied eight-GPU server (before the 50b extension):
+| Fractional digits | Our fastest measured | Release computation | Release complete process | Fastest listed y-cruncher | Best-time speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10b | [**19.270**](benchmark_mgpu_10b.json) | [19.537](benchmark_mgpu_10b.json) | 23.431 | [44.059](https://www.numberworld.org/y-cruncher/benchmarks/charts/10b.html) | **2.29×** |
+| 25b | [**68.738**](validation/tuning/async144-v24.json) | [69.007](benchmark_mgpu_25b.json) | 75.906 | [120.282](https://www.numberworld.org/y-cruncher/benchmarks/charts/25b.html) | **1.75×** |
+| 50b | [**191.629**](validation/50b/v6-affinity320.json) | [199.707](benchmark_mgpu_50b.json) | 211.805 | [275.297](https://www.numberworld.org/y-cruncher/benchmarks/charts/50b.html) | **1.44×** |
+| 100b | [**591.787**](validation/100b/v3-serial32.json) | [626.418](benchmark_mgpu_100b.json) | 648.648 | [672.558](https://www.numberworld.org/y-cruncher/benchmarks/charts/100b.html) | **1.14×** |
 
-| Fractional digits | Computation | Complete process |
-| --- | ---: | ---: |
-| 10b | 19.54 s | 23.43 s |
-| 25b | 69.01 s | 75.91 s |
+**Fastest measured** includes individual tuning trials; the 25b, 50b, and
+100b best trials used profiling and explicit settings. These are best observed
+times, with raw records linked in the table. **Release** columns use three-run
+medians for the respective 10b/25b and 50b releases, and one final-build run
+for 100b, all with automatic defaults, no warmup, and profiling disabled.
+The earlier release measurements retain their original source hashes; they
+were recorded before the later extensions. Computation and complete-process
+medians are calculated independently.
 
-Computation includes host allocation, arithmetic, decimal conversion, and its
-host transfer. Complete process time also includes CUDA startup and teardown;
-these benchmark runs print previews, so neither column includes writing the
-full decimal file.
+The final 100b release benchmark takes **10 minutes 26 seconds**, giving a
+**1.07×** computation-time speedup over the listed y-cruncher leader. Its
+separate full-output verification run computed the digits in 615.617 s and
+then passed the complete reference comparison. Allocation order affects
+memory reuse and runtime, so the fastest tuning result is not a fixed bound.
 
-The measured settings are selected automatically; no environment flags are
-needed on the eight-card RTX Pro 6000 server. See [MULTI_GPU.md](MULTI_GPU.md)
-for the algorithm, memory requirements, verification hashes, tuning controls,
-and timing scope. The original single-GPU measurements and usage follow.
+### Comparison scope
+
+The linked y-cruncher charts were checked on September 11, 2026. Their fastest
+listed entries at all four sizes use **dual AMD EPYC 9R14 CPUs on AWS
+hpc7a.96xlarge, 740 GB RAM, and y-cruncher v0.8.1**. The 10b/25b/50b charts
+report an April 5, 2025 update; the 100b chart reports May 26, 2025. These are
+unofficial comparisons across different hardware against those listed
+records. Speedup is the listed y-cruncher time divided by our measured time.
+
+Our computation timing includes host allocation/reservation, binary splitting,
+square root, division, decimal conversion, and the decimal device-to-host
+transfer. CUDA context startup, output writing, verification, and teardown
+are excluded. Complete-process timing includes startup and teardown but prints
+only digit previews. The [y-cruncher benchmark definition](https://www.numberworld.org/y-cruncher/#Benchmarks)
+also includes decimal conversion and excludes writing digits to disk.
+
+### Implementation strategy
+
+- **Parallel binary splitting:** distribute independent exact subtrees across
+  the GPUs. At 100b, selected upper parent merges execute sequentially to
+  reduce retained host products, while each large multiplication uses all
+  eight GPUs.
+- **Bounded 96-bit NTT:** retain 32-bit limbs and the original prime
+  `2^96 - 2^32 + 1`. Independent products use local GPU transforms; larger
+  products use a distributed six-step NTT with peer transposes. Cyclic-tail
+  correction and recursive Karatsuba keep every transform within `2^32`
+  points, without an additional CRT modulus.
+- **Large integers and remaining stages:** use 64-bit host integer lengths
+  for 50b and above, and 64-bit term factors above the 32-bit term-index range
+  for 100b. Square-root and reciprocal refinement use GPU multiplication;
+  decimal conversion splits work into GPU-sized partitions.
+- **Memory reuse:** reusable pinned arenas, NUMA-aware host arithmetic, and
+  reservation overlapped with subtree computation reduce allocation and
+  transfer overhead. Separate registrations of at most 384 GiB avoid the
+  driver's large-registration limit. PCIe communication and host-memory
+  overhead increasingly limit scaling at larger sizes.
+
+The final verified 100b run peaked at **1.182 TB of host memory**, with sampled
+GPU peaks up to **85.884 GiB per card**. The optional lower-memory schedule
+completed in 615.676 s with a process host peak of approximately 742 GB;
+see [MULTI_GPU.md](MULTI_GPU.md) for its settings and memory measurements.
+
+Verified outputs remain on the server under
+`~/work/gpupi/batchmp3/results/` as `pi-10b.txt`, `pi-25b.txt`, `pi-50b.txt`,
+and `pi-100b.txt`. [The result manifest](results/manifest.json) records sizes
+and fractional-digit SHA-256 hashes. [Validation records](validation/README.md)
+include complete comparisons, arithmetic tests, CUDA memory checks, and
+source identification.
+
+The release settings are selected automatically on the eight-card RTX Pro
+6000 server. See [MULTI_GPU.md](MULTI_GPU.md) for the detailed algorithm,
+memory requirements, and tuning controls. Original single-GPU usage and
+measurements follow.
 
 ## Single-GPU build and run
 
