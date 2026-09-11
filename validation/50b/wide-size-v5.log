@@ -1,0 +1,2 @@
+PASS: 64-bit host integers above INT_MAX limbs (137438954567 bits)
+PASS: wide integer arithmetic against GMP

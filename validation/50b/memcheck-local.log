@@ -1,0 +1,3 @@
+========= COMPUTE-SANITIZER
+PASS: multi-GPU products, squares, carries, unequal operands, recursive reciprocal
+========= ERROR SUMMARY: 0 errors

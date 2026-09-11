@@ -1,0 +1,8 @@
+mode=0 trial=0 GB=1.074 alloc_s=0.424828 GBps=2.527
+mode=0 trial=1 GB=1.074 alloc_s=0.422362 GBps=2.542
+mode=1 trial=0 GB=1.074 alloc_s=0.102544 GBps=10.471
+mode=1 trial=1 GB=1.074 alloc_s=0.103061 GBps=10.418
+mode=2 trial=0 GB=1.074 alloc_s=0.099036 GBps=10.842
+mode=2 trial=1 GB=1.074 alloc_s=0.098575 GBps=10.893
+mode=3 trial=0 GB=1.074 alloc_s=0.097657 GBps=10.995
+mode=3 trial=1 GB=1.074 alloc_s=0.102615 GBps=10.464

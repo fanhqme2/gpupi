@@ -1,0 +1,17 @@
+reserve_launch_s=0.000063
+binary_split leaves=32 terms=3565158400 leaves_s=48.667510
+merge nodes=16 seconds=3.628616
+merge nodes=8 seconds=14.161109
+merge nodes=4 seconds=25.346503
+merge nodes=2 seconds=36.246355
+merge nodes=1 seconds=24.132514
+binary_split_s=152.183057
+sqrt_s=4.418705
+division_s=44.146379
+decimal powers_s=0.753311
+decimal split_s=10.357439
+decimal leaves_s=2.101545
+decimal_s=13.212553
+elapsed_ms=214757.001 digits=50000000000 gpus=8
+pinned hits=1028 misses=15 fallback=0 allocated_GB=542.146 allocation_s=73.807569 arena_peak_GB=542.146 arena_live_peak_GB=324.373
+BYTE MATCH: all 50,000,000,000 fractional digits; SHA-256=76312744aa02ead5482ed3e65c3969f39657d6b221d5dcb22e5d2bb65d786e49

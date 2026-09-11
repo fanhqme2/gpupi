@@ -1,0 +1,4 @@
+profile leaves=0 upload_s=0.000000 arithmetic_s=0.000000 download_s=0.000000
+mul k=32 gpus=8 grain=536870912 trial=0 seconds=13.637251
+profile leaves=0 upload_s=0.000000 arithmetic_s=0.000000 download_s=0.000000
+mul k=32 gpus=8 grain=536870912 trial=1 seconds=13.355380

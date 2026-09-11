@@ -1,0 +1,6 @@
+binary_split leaves=56 terms=7130316800 leaves_s=117.901597
+binary_split_s=448.813810
+sqrt_s=12.234636
+division_s=132.173755
+decimal_s=33.195746
+elapsed_ms=626418.221 digits=100000000000 gpus=8

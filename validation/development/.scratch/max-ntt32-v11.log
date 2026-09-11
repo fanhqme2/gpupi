@@ -1,0 +1,4 @@
+dntt k=32 gpus=8 allocate=0.043472 forward=1.787221 inner=0.129355 inverse=0.718783 scan=0.005082 output=0.094118 total=2.778031
+maximal k=31 gpus=8 square=0 seconds=2.778221 ALL 4294967236 LIMBS PASS
+dntt k=32 gpus=8 allocate=0.000367 forward=0.783386 inner=0.094683 inverse=0.813127 scan=0.005074 output=0.088680 total=1.785316
+maximal k=31 gpus=8 square=1 seconds=1.785386 ALL 4294967262 LIMBS PASS

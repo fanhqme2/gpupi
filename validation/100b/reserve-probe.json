@@ -1,0 +1,20 @@
+[
+  {
+    "gib": 640,
+    "returncode": 1,
+    "stdout": "gpus=8 bytes=687194767360 success=0 seconds=28.119346\n",
+    "stderr": "host_register_failed bytes=687194767360 error=out of memory\n"
+  },
+  {
+    "gib": 512,
+    "returncode": 1,
+    "stdout": "gpus=8 bytes=549755813888 success=0 seconds=21.972931\n",
+    "stderr": "host_register_failed bytes=549755813888 error=out of memory\n"
+  },
+  {
+    "gib": 384,
+    "returncode": 0,
+    "stdout": "gpus=8 bytes=412316860416 success=1 seconds=49.978746\n",
+    "stderr": ""
+  }
+]

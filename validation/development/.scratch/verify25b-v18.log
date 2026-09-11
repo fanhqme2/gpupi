@@ -1,0 +1,58 @@
+reserve_s=26.659268
+binary_split leaves=13 terms=1853882368 leaves_s=11.616803
+merge nodes=7 seconds=2.258135
+dntt k=31 gpus=8 allocate=0.011313 forward=0.271636 inner=0.077631 inverse=0.124497 scan=0.002790 output=0.070064 total=0.557930
+cyclic words=2251524724 first=0 tail=104041076 seconds=0.669362
+dntt k=31 gpus=8 allocate=0.000307 forward=0.288619 inner=0.077968 inverse=0.164101 scan=0.002777 output=0.101903 total=0.635675
+cyclic words=2211155320 first=0 tail=63671672 seconds=0.712678
+merge nodes=4 seconds=10.357152
+dntt k=31 gpus=8 allocate=0.000403 forward=0.305263 inner=0.078533 inverse=0.136831 scan=0.002633 output=0.070615 total=0.594278
+cyclic words=2651718084 first=56461740 tail=504234436 seconds=1.031080
+dntt k=32 gpus=8 allocate=0.053320 forward=0.566527 inner=0.128105 inverse=0.276592 scan=0.004980 output=0.086938 total=1.116462
+dntt k=32 gpus=8 allocate=0.000544 forward=0.694075 inner=0.127559 inverse=0.248168 scan=0.004992 output=0.095679 total=1.171016
+dntt k=32 gpus=8 allocate=0.000358 forward=0.593067 inner=0.127579 inverse=0.242056 scan=0.005117 output=0.090637 total=1.058814
+cyclic words=4315355886 first=1720099544 tail=20388590 seconds=1.087983
+dntt k=32 gpus=8 allocate=0.000377 forward=0.719944 inner=0.127828 inverse=0.228533 scan=0.005002 output=0.093442 total=1.175125
+dntt k=32 gpus=8 allocate=0.000465 forward=0.668563 inner=0.127675 inverse=0.228892 scan=0.005029 output=0.086789 total=1.117414
+merge nodes=2 seconds=7.447663
+dntt k=32 gpus=8 allocate=0.000380 forward=0.633540 inner=0.127480 inverse=0.293422 scan=0.005058 output=0.063598 total=1.123478
+cyclic words=5190512684 first=2595256342 tail=895545388 seconds=1.934528
+dntt k=32 gpus=8 allocate=0.000283 forward=0.588842 inner=0.127444 inverse=0.307786 scan=0.005042 output=0.064177 total=1.093573
+cyclic words=5190512684 first=2595256342 tail=895545388 seconds=1.894349
+dntt k=32 gpus=8 allocate=0.000314 forward=0.715515 inner=0.127564 inverse=0.296499 scan=0.005031 output=0.060161 total=1.205084
+cyclic words=5190512684 first=2595256342 tail=895545388 seconds=1.982313
+merge nodes=1 seconds=6.072960
+binary_split_s=37.753045
+sqrt_s=2.003356
+dntt k=32 gpus=8 allocate=0.000355 forward=0.683364 inner=0.127421 inverse=0.280873 scan=0.004955 output=0.089857 total=1.186826
+cyclic words=4335542852 first=1740286508 tail=40575556 seconds=1.238057
+dntt k=32 gpus=8 allocate=0.000346 forward=0.647736 inner=0.127388 inverse=0.286197 scan=0.004993 output=0.100044 total=1.166704
+cyclic words=4335542850 first=1740286508 tail=40575554 seconds=1.214232
+dntt k=28 gpus=8 allocate=0.000335 forward=0.034751 inner=0.009631 inverse=0.016015 scan=0.000578 output=0.009551 total=0.070861
+cyclic words=324407046 first=0 tail=55971590 seconds=0.127646
+dntt k=29 gpus=8 allocate=0.000360 forward=0.060591 inner=0.012677 inverse=0.025045 scan=0.000922 output=0.017180 total=0.116775
+dntt k=29 gpus=8 allocate=0.000343 forward=0.059728 inner=0.012719 inverse=0.025019 scan=0.000905 output=0.014682 total=0.113396
+dntt k=29 gpus=8 allocate=0.000301 forward=0.064626 inner=0.012675 inverse=0.032247 scan=0.000904 output=0.018221 total=0.128974
+cyclic words=648814088 first=0 tail=111943176 seconds=0.224337
+dntt k=30 gpus=8 allocate=0.000334 forward=0.124539 inner=0.050525 inverse=0.050849 scan=0.001480 output=0.026988 total=0.254715
+dntt k=30 gpus=8 allocate=0.000364 forward=0.123656 inner=0.050343 inverse=0.051186 scan=0.001491 output=0.025272 total=0.252312
+dntt k=30 gpus=8 allocate=0.000381 forward=0.125191 inner=0.050517 inverse=0.064927 scan=0.001490 output=0.039448 total=0.281955
+cyclic words=1297628174 first=0 tail=223886350 seconds=0.459384
+dntt k=31 gpus=8 allocate=0.000412 forward=0.253791 inner=0.077575 inverse=0.117438 scan=0.002703 output=0.070131 total=0.522050
+dntt k=31 gpus=8 allocate=0.000348 forward=0.252875 inner=0.077698 inverse=0.114593 scan=0.002684 output=0.060487 total=0.508684
+dntt k=31 gpus=8 allocate=0.000327 forward=0.258774 inner=0.077850 inverse=0.158682 scan=0.002696 output=0.069224 total=0.567552
+cyclic words=2595256342 first=0 tail=447772694 seconds=0.980443
+dntt k=32 gpus=8 allocate=0.000410 forward=0.626549 inner=0.127458 inverse=0.269150 scan=0.005083 output=0.131814 total=1.160464
+dntt k=32 gpus=8 allocate=0.000376 forward=0.597474 inner=0.127460 inverse=0.344490 scan=0.005124 output=0.057971 total=1.132894
+cyclic words=5190512684 first=2595256340 tail=895545388 seconds=1.878876
+division_s=14.399160
+dntt k=29 gpus=8 allocate=0.000514 forward=0.030685 inner=0.009211 inverse=0.025103 scan=0.000935 output=0.012057 total=0.078505
+dntt k=30 gpus=8 allocate=0.000352 forward=0.059238 inner=0.039322 inverse=0.049816 scan=0.001467 output=0.032745 total=0.182939
+decimal powers_s=0.396407
+dntt k=32 gpus=8 allocate=0.000412 forward=0.572685 inner=0.127262 inverse=0.291544 scan=0.005032 output=0.102534 total=1.099470
+decimal split_s=7.473313
+decimal leaves_s=5.518855
+decimal_s=13.388768
+elapsed_ms=94203.830 digits=25000000000 gpus=8
+pinned hits=538 misses=7 fallback=0 allocated_GB=243.590 allocation_s=39.209067 arena_peak_GB=243.590 arena_live_peak_GB=213.978
+BYTE MATCH: all 25,000,000,000 fractional digits; SHA-256=164af5c396b3b87755a99ab07cd6141f8811401d4ccf33b54001f3124f9b54bb

@@ -1,164 +1,89 @@
 {
   "date": "2026-09-10",
-  "ported_from": "batchmp2 a169bcd (production arithmetic unchanged from 2123917)",
-  "timing_scope": "Arithmetic and decimal conversion; excludes initial CUDA setup, final host transfer, hashing and printing",
-  "rtx_5090": {
-    "compiler": "CUDA 13.1 nvcc V13.1.115, default -O3",
-    "driver": "591.86",
-    "measurement": "Fresh measurements after building this port; one warmup and five serial trials per size",
-    "benchmarks": [
-      {
-        "digits": 1000000000,
-        "times_ms": [
-          3504.505,
-          3505.36,
-          3526.114,
-          3509.724,
-          3515.072
-        ],
-        "median_ms": 3509.724,
-        "best_ms": 3504.505,
-        "worst_ms": 3526.114,
-        "warmups_ms": [
-          3644.505
-        ]
-      },
-      {
-        "digits": 500000000,
-        "times_ms": [
-          1631.673,
-          1630.576,
-          1637.075,
-          1633.675,
-          1633.047
-        ],
-        "median_ms": 1633.047,
-        "best_ms": 1630.576,
-        "worst_ms": 1637.075,
-        "warmups_ms": [
-          1631.07
-        ]
-      },
-      {
-        "digits": 250000000,
-        "times_ms": [
-          799.31,
-          802.425,
-          804.402,
-          800.297,
-          801.277
-        ],
-        "median_ms": 801.277,
-        "best_ms": 799.31,
-        "worst_ms": 804.402,
-        "warmups_ms": [
-          800.156
-        ]
-      }
-    ],
-    "full_1b_output_ms": 3508.156,
-    "full_1b_fractional_sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
-    "full_1b_reference_match": true
-  },
-  "rtx_pro_6000": {
+  "device": "RTX Pro 6000 96 GB (user-reported; nvidia-smi: NVIDIA RPBZZZ6)",
+  "driver": "580.159.04",
+  "compiler": "CUDA 13.0 nvcc",
+  "build": "make -j8 NVCC=/usr/local/cuda-13.0/bin/nvcc (default -O3)",
+  "command": "python3 benchmark_pi.py --runs 5 --warmups 1",
+  "fractional_digits": 2500000000,
+  "timing_scope": "GPU computation and decimal conversion; excludes initial CUDA setup, final host transfer, output hashing and printing",
+  "warmup_ms": 11489.126,
+  "trials_ms": [
+    11659.386,
+    11629.848,
+    11445.973,
+    11440.569,
+    11440.968
+  ],
+  "median_ms": 11445.973,
+  "best_ms": 11440.569,
+  "worst_ms": 11659.386,
+  "arithmetic_workspace_bytes": 25769803776,
+  "comparison_target_ms": 12500,
+  "comparison_url": "https://www.numberworld.org/y-cruncher/benchmarks/charts/2.5b.html",
+  "reference": "y-cruncher v0.8.7 build 9547, custom pi -dec:2500000000 -hex:0 -verify:1",
+  "reference_fractional_sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+  "optimized_fractional_sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+  "full_output_run_ms": 11656.01,
+  "source_commit": "be9eaf9 (final performance implementation)",
+  "optimized_full_digest_comparison": "PASS: SHA-256 of all 2,500,000,000 fractional digits, with exact length and suffix checks",
+  "median_time_reduction_percent": 6.7066472200455225,
+  "previous_version": {
+    "commit": "474d751",
+    "date": "2026-09-10",
     "device": "RTX Pro 6000 96 GB (user-reported; nvidia-smi: NVIDIA RPBZZZ6)",
-    "compiler": "CUDA 13.0 nvcc -O3",
-    "measurement": "Previously measured on byte-identical production source in batchmp2; not rerun as part of this port",
-    "benchmarks": [
-      {
-        "digits": 1000000000,
-        "sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
-        "reference_match": true,
-        "full_output_ms": 3309.063,
-        "warmups_ms": [
-          3206.405
-        ],
-        "times_ms": [
-          3388.219,
-          3171.524,
-          3213.666
-        ],
-        "median_ms": 3213.666,
-        "best_ms": 3171.524,
-        "worst_ms": 3388.219
-      },
-      {
-        "digits": 2500000000,
-        "sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
-        "reference_match": true,
-        "full_output_ms": 9542.782,
-        "warmups_ms": [
-          9444.552
-        ],
-        "times_ms": [
-          9600.286,
-          9395.885,
-          9677.284
-        ],
-        "median_ms": 9600.286,
-        "best_ms": 9395.885,
-        "worst_ms": 9677.284
-      },
-      {
-        "digits": 5000000000,
-        "commit": "2123917333e79502646a6ccde480a1bec9457771",
-        "warmups_ms": [
-          20298.111
-        ],
-        "times_ms": [
-          20296.213,
-          20297.523,
-          20665.99,
-          20381.312,
-          20291.771
-        ],
-        "median_ms": 20297.523,
-        "best_ms": 20291.771,
-        "worst_ms": 20665.99,
-        "all_trials_below_cpu_chart": true,
-        "median_reduction_vs_cpu_chart_percent": 9.292921303123736,
-        "median_reduction_vs_previous_version_percent": 8.22825090003806,
-        "settings": "Default -O3 build; explicit PTX 96-bit product, shift-based inverse normalization, shorter canonical add/subtract/reduction corrections and const/restrict root pointers; all prior splitting and transform schedules retained",
-        "full_output_ms": 20362.848,
-        "full_fractional_sha256": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72",
-        "reference_match": true
-      }
-    ]
+    "driver": "580.159.04",
+    "compiler": "CUDA 13.0 nvcc",
+    "build": "make -j8 NVCC=/usr/local/cuda-13.0/bin/nvcc (default -O3)",
+    "command": "python3 benchmark_pi.py --runs 5 --warmups 1",
+    "fractional_digits": 2500000000,
+    "timing_scope": "GPU computation and decimal conversion; excludes initial CUDA setup, final host transfer, output hashing and printing",
+    "warmup_ms": 12196.646,
+    "trials_ms": [
+      12350.459,
+      12190.312,
+      12298.887,
+      12264.063,
+      12268.798
+    ],
+    "median_ms": 12268.798,
+    "best_ms": 12190.312,
+    "worst_ms": 12350.459,
+    "arithmetic_workspace_bytes": 25769803776,
+    "comparison_target_ms": 12500,
+    "comparison_url": "https://www.numberworld.org/y-cruncher/benchmarks/charts/2.5b.html",
+    "reference": "y-cruncher v0.8.7 build 9547, custom pi -dec:2500000000 -hex:0 -verify:1",
+    "reference_fractional_sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+    "optimized_full_byte_comparison": "PASS: all 2,500,000,000 fractional digits",
+    "optimized_fractional_sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+    "full_output_run_ms": 12400.733
   },
-  "reference": {
-    "digits": 5000000000,
-    "sha256": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72",
-    "ycruncher_computation_s": 98.81,
-    "ycruncher_wall_s": 158.807,
-    "generator": "y-cruncher v0.8.7.9547-static",
-    "verification_enabled": true,
-    "command": "'../ycruncher/y-cruncher v0.8.7.9547-static/y-cruncher' skip-warnings pause:-2 custom pi -dec:5000000000 -hex:0 -verify:1 -o .scratch/reference5b"
+  "additional_validation": {
+    "gmp_multiplication_suite": "PASS, including small and large broadcast transforms",
+    "full_limb_carry_tests": "PASS at k24, k28, k29",
+    "local_billion_fractional_sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+    "pi_boundary_counts": 23,
+    "pi_boundary_max_digits": 250000,
+    "cuda_memcheck_errors": 0
   },
-  "production_file_sha256": {
-    "batch_arith.cu": "10af4368e27d1287b0a13efba90b5e065e67a6ec7312e1d10c7169788c4ba977",
-    "batch_arith.h": "0d9eaa11b4b0067194a50fe2177908f69262cb05a9d27ddc67ff0e176afde6f1",
-    "batch_bitlength.cu": "6ec88b586a2db3857dbbc19f3c1524ae7c968eb8766a8283414c71bba3b8fc43",
-    "batch_bitlength.h": "f2b49ff52c680971b47047c91995cca0c7730adca0ddbe4d1b0db33880472d54",
-    "batch_decimal_naive.cu": "6a28b79187ee55ed042297d5387e5c308e4e351ad5f190c643a5d30f18fe9bf3",
-    "batch_exactdiv_small.cu": "2a3336065c7e389d7472e3e6881599636ee43b931e0173a1c0fc73ebca42f00d",
-    "batch_exactdiv_small.h": "98314692e5c03c0f97ee3fee9f5252b7aff052798db3c07268e7b661eb624731",
-    "batch_mul_ntt.cu": "9fff969f3dc1c2773a38f3c15d744aa9fd33297dc5307c986e6c6303fa0060c5",
-    "batch_mul_ntt.h": "02acccf0f1d2ddcec1e6c124cb4ddac1e1b6d8a585dc199dc873d0b310ac1460",
-    "batch_shift.cu": "51183eeedb38796e3edee2bcd61297b915fc4ed880c42fa32ac59d0015a95065",
-    "batch_shift.h": "683233302b982550465a952d40eddf9df4a7344877016aaa475f4603839ed041",
-    "convert_decimal.cu": "cfd70e83fa48a9ecefcab8bdb0d7c7d0673ba70b8150c5eae5f26cbb0d5b9662",
-    "convert_decimal.h": "725c7ed1f4708cf67458fd348b06e0c162d25a1a2a69c171719a29e490368b15",
-    "pi_bs_gpu.cu": "8f694a99cf6bfef3c83ff5af163a6c17a57bc696a95b2cb103cddad60fe1739a",
-    "ntt_mod96.cuh": "4255cb39cd571547736a175494982f4d5856af5cd1921bb088cf4c6e748d3fb0"
-  },
-  "port_validation": {
-    "production_source": "All 15 modified production files are byte-identical to the verified batchmp2 source",
-    "arithmetic_api": "Full batch_arith_test suite passed",
-    "modular_primitives": "131072 GMP multiplication/addition/subtraction/scaling cases passed, including boundaries",
-    "exact_division_chains": "GMP cases passed through 2048 limbs and 32 divisors",
-    "bitlength": "Full GMP correctness suite passed",
-    "common_factors": "Exhaustive residue proof passed for 34, 68, 136 terms",
-    "cuda_memcheck": "One million digits; zero errors",
-    "full_output": "All one billion fractional digits match the reference SHA-256; exact length and newline checked"
+  "rtx_pro_6000_billion_digits": {
+    "fractional_digits": 1000000000,
+    "command": "python3 benchmark_pi.py --digits 1000000000 --warmups 1 --runs 5",
+    "warmup_ms": 3767.473,
+    "trials_ms": [
+      3866.589,
+      3780.426,
+      3740.206,
+      3776.094,
+      3749.482
+    ],
+    "median_ms": 3776.094,
+    "best_ms": 3740.206,
+    "worst_ms": 3866.589,
+    "user_reported_original_ms": 3760,
+    "full_output_run_ms": 3839.343,
+    "fractional_sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+    "validation": "PASS: complete output digest matches verified reference; exact length and newline checked",
+    "timing_scope": "GPU computation and decimal conversion; excludes initial CUDA setup, final host transfer, output hashing and printing"
   }
 }

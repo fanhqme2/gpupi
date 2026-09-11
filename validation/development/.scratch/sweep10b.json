@@ -1,0 +1,56 @@
+[
+  {
+    "name": "baseline",
+    "cap": 23,
+    "threads": 32,
+    "threshold": 2147483649,
+    "returncode": 0,
+    "wall_s": 32.12137739791069,
+    "elapsed_ms": 28272.304
+  },
+  {
+    "name": "serial",
+    "cap": 23,
+    "threads": 32,
+    "threshold": 268435456,
+    "returncode": 0,
+    "wall_s": 30.862713717040606,
+    "elapsed_ms": 26994.99
+  },
+  {
+    "name": "cap22",
+    "cap": 22,
+    "threads": 32,
+    "threshold": 268435456,
+    "returncode": 0,
+    "wall_s": 32.23855607199948,
+    "elapsed_ms": 28194.529
+  },
+  {
+    "name": "cap21",
+    "cap": 21,
+    "threads": 32,
+    "threshold": 268435456,
+    "returncode": 0,
+    "wall_s": 31.8608864240814,
+    "elapsed_ms": 27751.161
+  },
+  {
+    "name": "threads8-cap22",
+    "cap": 22,
+    "threads": 8,
+    "threshold": 268435456,
+    "returncode": 0,
+    "wall_s": 35.36487400101032,
+    "elapsed_ms": 31293.461
+  },
+  {
+    "name": "threads8-cap23",
+    "cap": 23,
+    "threads": 8,
+    "threshold": 268435456,
+    "returncode": 0,
+    "wall_s": 33.79432721005287,
+    "elapsed_ms": 29942.876
+  }
+]

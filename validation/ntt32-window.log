@@ -1,0 +1,2 @@
+maximal k=32 gpus=8 square=0 wrap=1 seconds=4.697911 ALL 2684354530 LIMBS PASS
+maximal k=32 gpus=8 square=1 wrap=1 seconds=3.224329 ALL 2684354544 LIMBS PASS

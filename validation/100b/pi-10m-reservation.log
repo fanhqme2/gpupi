@@ -1,0 +1,7 @@
+binary_split leaves=4 terms=705296 leaves_s=0.217175
+binary_split_s=0.225957
+sqrt_s=0.008432
+division_s=0.017978
+decimal_s=0.019815
+elapsed_ms=273.812 digits=10000000 gpus=1
+SHA-256 MATCH: all 10,000,000 fractional digits; SHA-256=c3d3dd4bd5d1051fd5995db983eb898ac0308189a20c46e80e5f67d5f415edf1

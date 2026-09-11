@@ -1,0 +1,13 @@
+distributed k=10 gpus=1 seconds=0.005909 PASS
+distributed k=11 gpus=1 seconds=0.001369 PASS
+distributed k=12 gpus=1 seconds=0.002551 PASS
+distributed k=13 gpus=1 seconds=0.002678 PASS
+distributed k=14 gpus=1 seconds=0.003023 PASS
+distributed k=15 gpus=1 seconds=0.003643 PASS
+distributed k=16 gpus=1 seconds=0.003831 PASS
+distributed k=17 gpus=1 seconds=0.004385 PASS
+distributed k=18 gpus=1 seconds=0.006382 PASS
+distributed k=19 gpus=1 seconds=0.005030 PASS
+distributed k=20 gpus=1 seconds=0.005563 PASS
+distributed k=21 gpus=1 seconds=0.006512 PASS
+distributed k=22 gpus=1 seconds=0.009480 PASS

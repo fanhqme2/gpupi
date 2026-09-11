@@ -1,0 +1,3 @@
+trial=0 warmup=False elapsed_ms=201141.815 process_wall_s=213.149
+trial=1 warmup=False elapsed_ms=199305.182 process_wall_s=211.634
+trial=2 warmup=False elapsed_ms=199706.660 process_wall_s=211.805

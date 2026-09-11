@@ -1,0 +1,11 @@
+/usr/local/cuda/bin/nvcc  -O3 -std=c++17 -arch=sm_120 -MMD -MP -MF build-final/pi_mgpu.d -c pi_mgpu.cu -o build-final/pi_mgpu.o
+/usr/local/cuda/bin/nvcc  -O3 -std=c++17 -arch=sm_120 -MMD -MP -MF build-final/pi_bs_gpu.d -c pi_bs_gpu.cu -o build-final/pi_bs_gpu.o
+make: 'wide_int_test' is up to date.
+pi_bs_gpu.cu(360): warning #177-D: function "<unnamed>::profile_mul_small" was declared but never referenced
+  cudaError_t profile_mul_small(
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_120  build-final/pi_bs_gpu.o build-final/batch_arith.o build-final/batch_mul_ntt.o build-final/batch_add.o build-final/batch_sub.o build-final/batch_shift_add.o build-final/batch_shift_sub.o build-final/batch_mul_small.o build-final/batch_exactdiv_small.o build-final/batch_add_small.o build-final/batch_sub_small.o build-final/batch_mul_naive.o build-final/batch_bitlength.o build-final/batch_shift.o build-final/convert_decimal.o build-final/batch_decimal_naive.o -lgmp -o pi_bs_gpu
+/usr/local/cuda/bin/nvcc -O3 -std=c++17 -arch=sm_120  build-final/pi_mgpu.o build-final/distributed_ntt.o build-final/batch_arith.o build-final/batch_mul_ntt.o build-final/batch_add.o build-final/batch_sub.o build-final/batch_shift_add.o build-final/batch_shift_sub.o build-final/batch_mul_small.o build-final/batch_exactdiv_small.o build-final/batch_add_small.o build-final/batch_sub_small.o build-final/batch_mul_naive.o build-final/batch_bitlength.o build-final/batch_shift.o build-final/convert_decimal.o build-final/batch_decimal_naive.o -lgmpxx -lgmp -Xcompiler -pthread -o pi_mgpu

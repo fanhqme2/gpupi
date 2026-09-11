@@ -1,0 +1,32 @@
+{
+  "server": "8.152.101.180:7396",
+  "directory": "~/work/gpupi/batchmp3/results",
+  "format": "ASCII 3, fractional digits without decimal point, newline",
+  "verification": "All fractional digits compared byte for byte against separately generated y-cruncher references. Hashes cover fractional digits only.",
+  "files": [
+    {
+      "name": "pi-10b.txt",
+      "fractional_digits": 10000000000,
+      "bytes": 10000000002,
+      "fractional_digits_sha256": "1dabc86199e9f5e065fc2c839ebf77ba1546afaeb25aadbbccd82ffe522f5541"
+    },
+    {
+      "name": "pi-25b.txt",
+      "fractional_digits": 25000000000,
+      "bytes": 25000000002,
+      "fractional_digits_sha256": "164af5c396b3b87755a99ab07cd6141f8811401d4ccf33b54001f3124f9b54bb"
+    },
+    {
+      "name": "pi-50b.txt",
+      "fractional_digits": 50000000000,
+      "bytes": 50000000002,
+      "fractional_digits_sha256": "76312744aa02ead5482ed3e65c3969f39657d6b221d5dcb22e5d2bb65d786e49"
+    },
+    {
+      "name": "pi-100b.txt",
+      "fractional_digits": 100000000000,
+      "bytes": 100000000002,
+      "fractional_digits_sha256": "78d8a7b1d47170bd95749cc4f4a5f1d047cda93d021fb7790c290433b869fe3a"
+    }
+  ]
+}

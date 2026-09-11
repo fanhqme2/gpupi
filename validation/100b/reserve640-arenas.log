@@ -1,0 +1,3 @@
+gpus=8 bytes=687194767360 success=1 arenas=2 seconds=83.156795
+PASS: registered range endpoints transfer correctly on every GPU
+PASS: pool allocations stay within one registration range

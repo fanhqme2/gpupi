@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/pfs/fhq/work/gpupi/batchmp3/benchmark_mgpu.py", line 61, in <module>
+    main()
+  File "/pfs/fhq/work/gpupi/batchmp3/benchmark_mgpu.py", line 45, in main
+    raise RuntimeError(result.stderr)
+RuntimeError: reserve_launch_s=0.000089
+binary_split leaves=56 terms=7130316800 leaves_s=118.132366
+merge nodes=28 seconds=6.972079
+pinned hits=430 misses=1 fallback=0 allocated_GB=687.195 allocation_s=84.311257 arena_peak_GB=687.195 arena_live_peak_GB=505.365
+ERROR: invalid argument
+

@@ -1,0 +1,2 @@
+nvcc  -O3 -std=c++17 -arch=sm_120 -MMD -MP -MF build/pi_mgpu.d -c pi_mgpu.cu -o build/pi_mgpu.o
+nvcc -O3 -std=c++17 -arch=sm_120  build/pi_mgpu.o build/distributed_ntt.o build/batch_arith.o build/batch_mul_ntt.o build/batch_add.o build/batch_sub.o build/batch_shift_add.o build/batch_shift_sub.o build/batch_mul_small.o build/batch_exactdiv_small.o build/batch_add_small.o build/batch_sub_small.o build/batch_mul_naive.o build/batch_bitlength.o build/batch_shift.o build/convert_decimal.o build/batch_decimal_naive.o -lgmpxx -lgmp -Xcompiler -pthread -o pi_mgpu

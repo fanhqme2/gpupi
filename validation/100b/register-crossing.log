@@ -1,0 +1,3 @@
+offset=4096 cudaMemcpy=no error
+offset=412316856320 cudaMemcpy=invalid argument
+offset=412316864512 cudaMemcpy=no error

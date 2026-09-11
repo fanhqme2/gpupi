@@ -1,0 +1,12 @@
+binary_split leaves=10 terms=713031680 leaves_s=14.119169
+merge nodes=5 seconds=14.615113
+merge nodes=3 seconds=7.646277
+merge nodes=2 seconds=7.665432
+merge nodes=1 seconds=5.048437
+binary_split_s=49.094879
+sqrt_s=1.476145
+division_s=12.479007
+decimal_s=21.853799
+elapsed_ms=86635.672 digits=10000000000 gpus=8
+pinned hits=201 misses=147 fallback=0 allocated_GB=176.767 allocation_s=169.173599
+BYTE MATCH: all 10,000,000,000 fractional digits; SHA-256=1dabc86199e9f5e065fc2c839ebf77ba1546afaeb25aadbbccd82ffe522f5541

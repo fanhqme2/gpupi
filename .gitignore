@@ -1,0 +1,12 @@
+/build*/
+/.scratch/
+__pycache__/
+*.pyc
+*.o
+*.d
+/pi_bs_gpu
+/pi_mgpu
+/*_test
+/*_bench
+/results/pi-*.txt
+/pi-*.txt

@@ -1,0 +1,6 @@
+bound=0 threads=8 output_GBps=25.512 seconds=0.336701
+bound=0 threads=32 output_GBps=53.812 seconds=0.159629
+bound=0 threads=64 output_GBps=58.208 seconds=0.147573
+bound=1 threads=8 output_GBps=27.491 seconds=0.312466
+bound=1 threads=32 output_GBps=82.977 seconds=0.103522
+bound=1 threads=64 output_GBps=80.213 seconds=0.107088

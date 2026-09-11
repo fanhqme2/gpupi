@@ -10,6 +10,7 @@
 #include <vector>
 #include <cerrno>
 #include <climits>
+#include <type_traits>
 
 #include <gmp.h>
 
@@ -36,27 +37,45 @@ __device__ __forceinline__ void reduce_gcd_quotient(uint32_t &a, uint32_t &b){
     }
 }
 
-// leaf case of binary splitting.
-template<bool is_head>
-__global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * arr_R, int N, uint32_t block_offset = 0){
+// Multiply a bounded leaf value by a two-word scalar without truncating it.
+template<int limbs>
+__device__ __forceinline__ void leaf_mul_u64(uint32_t (&a)[limbs], uint64_t factor){
+    uint32_t out[limbs]={};
+    for(int h=0;h<2;h++){
+        uint64_t carry=0;uint32_t word=factor>>(h*32);
+        for(int j=h;j<limbs;j++){
+            uint64_t v=(uint64_t)a[j-h]*word+out[j]+carry;
+            out[j]=(uint32_t)v;carry=v>>32;
+        }
+    }
+    for(int j=0;j<limbs;j++)a[j]=out[j];
+}
+
+// Through 2^33 terms, the uncancelled P/Q/R need at most 106/138/188 bits,
+// fitting the 128/160/192-bit leaf arrays (the 100b run uses 7.13b terms).
+// Keep the original 32-bit scalar specialization for earlier term ranges.
+template<bool is_head, bool wide = false, bool large_terms = false>
+__global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t * arr_R, int N, uint64_t block_offset = 0){
+    static_assert(!large_terms || wide, "large terms require wide leaf storage");
+    using Term=std::conditional_t<large_terms,uint64_t,uint32_t>;
     for (int i2 = blockIdx.x * blockDim.x + threadIdx.x; i2 < N; i2 += blockDim.x * gridDim.x){
-        uint32_t i;
+        Term i;
         if (is_head){
             i = i2 * 17 + 16;
         }else{
             i = i2 + (i2 >> 4);
         }
-        i += block_offset * 17u;
-        uint32_t p1 = 6u * i + 1;
-        uint32_t p2 = 2u * i + 1;
-        uint32_t p3 = 6u * i + 5;
-        uint32_t q1 = i + 1;
-        uint32_t q2 = i + 1;
-        uint32_t q3 = i + 1;
+        i += block_offset * 17ull;
+        uint64_t p1 = 6ull * i + 1;
+        uint64_t p2 = 2ull * i + 1;
+        uint64_t p3 = 6ull * i + 5;
+        Term q1 = i + 1;
+        Term q2 = i + 1;
+        Term q3 = i + 1;
         uint32_t q4 = 640320 >> 6;
         uint32_t q5 = 40020 >> 2;
         uint32_t q6 = 426880 >> 7;
-        uint64_t r1 = (int64_t)545140134 * i + 13591409;
+        uint64_t r1 = 545140134ull * i + 13591409;
         if (p1 % 5 == 0 && q1 % 5 == 0) {
             p1 /= 5;
             q1 /= 5;
@@ -69,68 +88,59 @@ __global__ void construct_leaf_17(uint32_t * arr_P, uint32_t * arr_Q, uint32_t *
             p1 /= 5;
             q3 /= 5;
         }
-        reduce_gcd_quotient(p1, q4);
-        reduce_gcd_quotient(p1, q5);
-        reduce_gcd_quotient(p2, q4);
-        reduce_gcd_quotient(p2, q5);
-        reduce_gcd_quotient(p3, q4);
-        reduce_gcd_quotient(p3, q5);
-
-        // p = mpz(p1) * p2 * p3
-        // q = mpz(q1) * q2 * q3 * q4 * q5 * q6
-        // r = mpz(r1) * q1 * q2 * q3 * q4 * q5
-
-        uint32_t P[3] = {p1, 0, 0};
-        uint32_t p_components[2] = {p2, p3};
-
-        for (int k = 0; k < 2; k ++){
-            uint32_t carry = 0;
-            for (int j = 0; j < 3; j++){
-                uint64_t mul = (uint64_t)P[j] * p_components[k] + carry;
-                P[j] = mul & 0xffffffff;
-                carry = mul >> 32;
+        auto cancel = [](uint64_t &p, uint32_t &q) {
+            for (uint32_t d : {3u, 5u, 23u, 29u}) if (p % d == 0 && q % d == 0) {p /= d; q /= d;}
+        };
+        cancel(p1,q4); cancel(p1,q5); cancel(p2,q4);
+        cancel(p2,q5); cancel(p3,q4); cancel(p3,q5);
+        uint32_t P[4] = {1,0,0,0};
+        uint64_t p_components[3] = {p1,p2,p3};
+        for (int k=0;k<3;k++) {
+            uint32_t tmp[4]={};
+            for (int h=0;h<2;h++) {
+                uint64_t carry=0;
+                uint32_t factor=p_components[k]>>(h*32);
+                for(int j=h;j<4;j++) {
+                    uint64_t v=(uint64_t)P[j-h]*factor+tmp[j]+carry;
+                    tmp[j]=(uint32_t)v; carry=v>>32;
+                }
             }
+            for(int j=0;j<4;j++)P[j]=tmp[j];
         }
 
-        uint32_t Q[4] = {q1, 0, 0, 0};
-        uint32_t q_components[5] = {q2, q3, q4, q5, q6};
+        uint32_t Q[5] = {(uint32_t)q1, (uint32_t)((uint64_t)q1>>32), 0, 0, 0};
+        Term q_components[5] = {q2, q3, q4, q5, q6};
 
         for (int k = 0; k < 5; k ++){
+            if constexpr(large_terms){leaf_mul_u64(Q,q_components[k]);}
+            else{
             uint32_t carry = 0;
-            for (int j = 0; j < 4; j++){
+            for (int j = 0; j < 5; j++){
                 uint64_t mul = (uint64_t)Q[j] * q_components[k] + carry;
                 Q[j] = mul & 0xffffffff;
                 carry = mul >> 32;
             }
+            }
         }
 
         uint32_t R[6] = {(uint32_t)r1, (uint32_t)(r1 >> 32), 0, 0, 0, 0};
-        uint32_t r_components[5] = {q1, q2, q3, q4, q5};
+        Term r_components[5] = {q1, q2, q3, q4, q5};
 
         for (int k = 0; k < 5; k ++){
+            if constexpr(large_terms){leaf_mul_u64(R,r_components[k]);}
+            else{
             uint32_t carry = 0;
             for (int j = 0; j < 6; j++){
                 uint64_t mul = (uint64_t)R[j] * r_components[k] + carry;
                 R[j] = mul & 0xffffffff;
                 carry = mul >> 32;
             }
+            }
         }
 
-        arr_P[i2 * 3 + 0] = P[0];
-        arr_P[i2 * 3 + 1] = P[1];
-        arr_P[i2 * 3 + 2] = P[2];
-
-        arr_Q[i2 * 4 + 0] = Q[0];
-        arr_Q[i2 * 4 + 1] = Q[1];
-        arr_Q[i2 * 4 + 2] = Q[2];
-        arr_Q[i2 * 4 + 3] = Q[3];
-
-        arr_R[i2 * 6 + 0] = R[0];
-        arr_R[i2 * 6 + 1] = R[1];
-        arr_R[i2 * 6 + 2] = R[2];
-        arr_R[i2 * 6 + 3] = R[3];
-        arr_R[i2 * 6 + 4] = R[4];
-        arr_R[i2 * 6 + 5] = R[5];
+        for (int j=0;j<(wide?4:3);j++)arr_P[(size_t)i2*(wide?4:3)+j]=P[j];
+        for (int j=0;j<(wide?5:4);j++)arr_Q[(size_t)i2*(wide?5:4)+j]=Q[j];
+        for (int j=0;j<6;j++)arr_R[(size_t)i2*6+j]=R[j];
     }
 }
 
@@ -517,12 +527,20 @@ cudaError_t profile_decimal_convert(
     } while (0)
 
 // do binary splitting for N * 17 elements, where N is a power of 2
-cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr, uint32_t block_offset = 0, BatchMPArray *P_out = nullptr){
+cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr, uint64_t block_offset = 0, BatchMPArray *P_out = nullptr){
     if (context == nullptr || N <= 0 || (N & (N - 1)) != 0) {
         return cudaErrorInvalidValue;
     }
+    // Bound the actual global index before allocating or launching a kernel.
+    if(block_offset>(1ull<<33)/17 || (uint64_t)N>(1ull<<33)/17-block_offset)return cudaErrorInvalidValue;
+    const bool large_terms=(block_offset+N)*17>UINT32_MAX;
     const uint32_t extra_common_limit = getenv("GPUPI_COMMON_FACTORS")
         ? (uint32_t)strtoul(getenv("GPUPI_COMMON_FACTORS"), nullptr, 10) : 136;
+    const bool wide = ((uint64_t)block_offset + N) * 17 > 700000000ull;
+    const uint32_t pl=wide?4:3, ql=wide?5:4;
+    const bool extended_storage=block_offset!=0 || wide;
+    const uint32_t ps=extended_storage?5:pl, qs=extended_storage?6:5, rs=extended_storage?8:6;
+    const uint32_t r1s=extended_storage?16:11, r2s=extended_storage?16:6+pl;
     // pre-allocate workspace for the 2^28 case
     cudaError_t workspace_err = batch_mp_ensure_workspace(context, 6442450944ull);
     if (workspace_err != cudaSuccess) return workspace_err;
@@ -541,11 +559,11 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
 
     uint32_t * temp_prod_workspace = nullptr;
     cudaError_t temp_workspace_err = cudaMalloc(&temp_prod_workspace,(
-        N * 3ull + 
-        N * 4ull +
+        N * (uint64_t)pl + 
+        N * (uint64_t)ql +
         N * 6ull +
-        N * 88ull +
-        N * 72ull
+        N * 8ull * r1s +
+        N * 8ull * r2s
     ) * 4);
     if (temp_workspace_err != cudaSuccess || temp_prod_workspace == nullptr) {
         return temp_workspace_err != cudaSuccess ? temp_workspace_err : cudaErrorMemoryAllocation;
@@ -568,22 +586,24 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         cudaFree(temp_prod_workspace_base);
     };
 
-    P0 = {.data = temp_prod_workspace, .length = 3, .batch_size = (uint32_t)N,  .stride = 3};
-    temp_prod_workspace += N * 3;
-    Q0 = {.data = temp_prod_workspace, .length = 4, .batch_size = (uint32_t)N,  .stride = 4};
-    temp_prod_workspace += N * 4;
+    P0 = {.data = temp_prod_workspace, .length = pl, .batch_size = (uint32_t)N,  .stride = pl};
+    temp_prod_workspace += (size_t)N * pl;
+    Q0 = {.data = temp_prod_workspace, .length = ql, .batch_size = (uint32_t)N,  .stride = ql};
+    temp_prod_workspace += (size_t)N * ql;
     R0 = {.data = temp_prod_workspace, .length = 6, .batch_size = (uint32_t)N,  .stride = 6};
     temp_prod_workspace += N * 6;
 
-    P = batch_mp_array_create(N * 16, 3);
-    Q = batch_mp_array_create(N * 16, 5); // we ask for 5 size, but will only use 4, for safety
-    R = batch_mp_array_create(N * 16, 6);
+    P = batch_mp_array_create(N * 16, ps);
+    P.length = P.stride = pl;
+    Q = batch_mp_array_create(N * 16, qs);
+    R = batch_mp_array_create(N * 16, rs);
+    R.length = R.stride = 6;
     if (P0.data == nullptr || Q0.data == nullptr || R0.data == nullptr || P.data == nullptr || Q.data == nullptr || R.data == nullptr) {
         release_all();
         return cudaErrorMemoryAllocation;
     }
-    Q.length = 4;
-    Q.stride = 4;
+    Q.length = ql;
+    Q.stride = ql;
 
     const int threads_per_block = 128;
     int num_blocks = min((N + threads_per_block - 1) / threads_per_block, 65535);
@@ -597,7 +617,9 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         false,
         profiler,
         [&]() {
-            construct_leaf_17<true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N, block_offset);
+            if(large_terms) construct_leaf_17<true,true,true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N, block_offset);
+            else if(wide) construct_leaf_17<true,true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N, block_offset);
+            else construct_leaf_17<true><<<num_blocks, threads_per_block>>>(P0.data, Q0.data, R0.data, N, block_offset);
             cudaError_t kernel_err = cudaGetLastError();
             if (kernel_err != cudaSuccess) {
                 return kernel_err;
@@ -617,7 +639,9 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         false,
         profiler,
         [&]() {
-            construct_leaf_17<false><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16, block_offset);
+            if(large_terms) construct_leaf_17<false,true,true><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16, block_offset);
+            else if(wide) construct_leaf_17<false,true><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16, block_offset);
+            else construct_leaf_17<false><<<num_blocks, threads_per_block>>>(P.data, Q.data, R.data, N * 16, block_offset);
             cudaError_t kernel_err = cudaGetLastError();
             if (kernel_err != cudaSuccess) {
                 return kernel_err;
@@ -627,13 +651,13 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     );
     CHECK_AND_RETURN(err, release_all());
     int n = N * 16;
-    P_next = batch_mp_array_create(n / 2, 6);
-    Q_next = batch_mp_array_create(n / 2, 10);
-    R_next = batch_mp_array_create(n / 2, 12);
+    P_next = batch_mp_array_create(n / 2, ps*2);
+    Q_next = batch_mp_array_create(n / 2, qs*2);
+    R_next = batch_mp_array_create(n / 2, rs*2);
     R_prod_1 = {.data = temp_prod_workspace, .length = 11, .batch_size = (uint32_t)(n / 2),  .stride = 11};
-    temp_prod_workspace += (n / 2) * 11;
-    R_prod_2 = {.data = temp_prod_workspace, .length = 9, .batch_size = (uint32_t)(n / 2),  .stride = 9};
-    temp_prod_workspace += (n / 2) * 9;
+    temp_prod_workspace += (size_t)(n / 2) * r1s;
+    R_prod_2 = {.data = temp_prod_workspace, .length = 6+pl, .batch_size = (uint32_t)(n / 2),  .stride = 6+pl};
+    temp_prod_workspace += (size_t)(n / 2) * r2s;
     
     if (P_next.data == nullptr || Q_next.data == nullptr || R_next.data == nullptr ||
         R_prod_1.data == nullptr || R_prod_2.data == nullptr) {

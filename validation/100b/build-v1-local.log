@@ -1,0 +1,10 @@
+nvcc  -O3 -std=c++17 -arch=sm_120 -MMD -MP -MF build/pi_mgpu.d -c pi_mgpu.cu -o build/pi_mgpu.o
+nvcc  -O3 -std=c++17 -arch=sm_120 -MMD -MP -MF build/pi_bs_gpu.d -c pi_bs_gpu.cu -o build/pi_bs_gpu.o
+pi_bs_gpu.cu(358): warning #177-D: function "<unnamed>::profile_mul_small" was declared but never referenced
+  cudaError_t profile_mul_small(
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+nvcc -O3 -std=c++17 -arch=sm_120  build/pi_bs_gpu.o build/batch_arith.o build/batch_mul_ntt.o build/batch_add.o build/batch_sub.o build/batch_shift_add.o build/batch_shift_sub.o build/batch_mul_small.o build/batch_exactdiv_small.o build/batch_add_small.o build/batch_sub_small.o build/batch_mul_naive.o build/batch_bitlength.o build/batch_shift.o build/convert_decimal.o build/batch_decimal_naive.o -lgmp -o pi_bs_gpu
+nvcc -O3 -std=c++17 -arch=sm_120  build/pi_mgpu.o build/distributed_ntt.o build/batch_arith.o build/batch_mul_ntt.o build/batch_add.o build/batch_sub.o build/batch_shift_add.o build/batch_shift_sub.o build/batch_mul_small.o build/batch_exactdiv_small.o build/batch_add_small.o build/batch_sub_small.o build/batch_mul_naive.o build/batch_bitlength.o build/batch_shift.o build/convert_decimal.o build/batch_decimal_naive.o -lgmpxx -lgmp -Xcompiler -pthread -o pi_mgpu

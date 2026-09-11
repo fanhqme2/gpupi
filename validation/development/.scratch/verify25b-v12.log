@@ -1,0 +1,33 @@
+binary_split leaves=25 terms=1782579200 leaves_s=17.317421
+merge nodes=13 seconds=9.740081
+merge nodes=7 seconds=10.516078
+dntt k=31 gpus=8 allocate=0.049683 forward=0.591929 inner=0.077687 inverse=0.403255 scan=0.106278 output=0.167378 total=1.396210
+dntt k=31 gpus=8 allocate=0.000321 forward=0.535686 inner=0.077260 inverse=0.269239 scan=0.002671 output=0.078449 total=0.963626
+merge nodes=4 seconds=22.964423
+dntt k=32 gpus=8 allocate=0.163403 forward=1.306038 inner=0.127492 inverse=0.545055 scan=0.005007 output=0.144936 total=2.291931
+dntt k=31 gpus=8 allocate=0.000300 forward=0.549653 inner=0.078321 inverse=0.378615 scan=0.002649 output=0.077841 total=1.087379
+dntt k=32 gpus=8 allocate=0.000315 forward=1.287163 inner=0.127690 inverse=0.485686 scan=0.005011 output=0.099306 total=2.005172
+dntt k=32 gpus=8 allocate=0.000392 forward=1.195515 inner=0.127384 inverse=0.574643 scan=0.005005 output=0.098046 total=2.000985
+dntt k=32 gpus=8 allocate=0.000822 forward=1.185520 inner=0.135352 inverse=1.220337 scan=0.016006 output=0.210066 total=2.768103
+dntt k=32 gpus=8 allocate=0.000490 forward=1.385791 inner=0.266777 inverse=0.521552 scan=0.128407 output=0.205403 total=2.508420
+merge nodes=2 seconds=28.584481
+dntt k=32 gpus=8 allocate=0.000328 forward=1.385313 inner=0.127465 inverse=0.745637 scan=0.004983 output=0.077268 total=2.340994
+dntt k=32 gpus=8 allocate=0.000290 forward=1.156378 inner=0.127510 inverse=0.591954 scan=0.005049 output=0.077161 total=1.958343
+dntt k=32 gpus=8 allocate=0.000325 forward=1.227934 inner=0.127493 inverse=0.585401 scan=0.004979 output=0.068194 total=2.014325
+merge nodes=1 seconds=20.467568
+binary_split_s=109.590574
+sqrt_s=4.145066
+dntt k=32 gpus=8 allocate=0.000289 forward=1.303653 inner=0.127457 inverse=0.527832 scan=0.005000 output=0.100012 total=2.064244
+dntt k=32 gpus=8 allocate=0.000322 forward=1.137598 inner=0.127657 inverse=0.610439 scan=0.005024 output=0.099682 total=1.980722
+dntt k=31 gpus=8 allocate=0.000342 forward=0.586895 inner=0.078448 inverse=0.279979 scan=0.002668 output=0.078505 total=1.026838
+dntt k=32 gpus=8 allocate=0.000373 forward=1.289170 inner=0.128040 inverse=0.517144 scan=0.004949 output=0.140072 total=2.079750
+dntt k=32 gpus=8 allocate=0.000319 forward=1.159241 inner=0.127962 inverse=0.713630 scan=0.004978 output=0.068177 total=2.074307
+division_s=51.440385
+decimal powers_s=0.544010
+dntt k=32 gpus=8 allocate=0.000386 forward=1.401666 inner=0.128041 inverse=0.577372 scan=0.004995 output=0.113612 total=2.226072
+decimal split_s=16.610191
+decimal leaves_s=5.921065
+decimal_s=23.363078
+elapsed_ms=189336.196 digits=25000000000 gpus=8
+pinned hits=293 misses=346 fallback=0 allocated_GB=825.522 allocation_s=181.081126
+BYTE MATCH: all 25,000,000,000 fractional digits; SHA-256=164af5c396b3b87755a99ab07cd6141f8811401d4ccf33b54001f3124f9b54bb

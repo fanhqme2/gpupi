@@ -1,0 +1,42 @@
+{
+  "command": [
+    "./.scratch/pi_mgpu-v19",
+    "10000000000",
+    "--benchmark"
+  ],
+  "environment": {
+    "GPUPI_MGPU_PROFILE": "1",
+    "GPUPI_SERIAL_DISTRIBUTED_MIN": "268435456",
+    "GPUPI_MGPU_PINNED": "1",
+    "GPUPI_MGPU_RESERVE": "68719476736",
+    "GPUPI_MGPU_PIN_CACHE": "549755813888",
+    "GPUPI_DNTT_CYCLIC": "1",
+    "GPUPI_DISTRIBUTED": "1",
+    "GPUPI_MGPU_REGISTER": "1",
+    "GPUPI_HOST_THREADS": "32",
+    "GPUPI_MGPU_ARENA": "1",
+    "GPUPI_MGPU_TREE_BLOCKS": "8388608",
+    "GPUPI_MGPU_EXACT_BLOCKS": "1"
+  },
+  "timing_scope": "Program elapsed_ms includes host arena reservation, binary splitting, sqrt, division, decimal conversion, and decimal D2H. Excludes CUDA context setup, output printing, verification, and teardown. process_wall_s includes the whole subprocess.",
+  "source_sha256": {
+    "pi_mgpu.cu": "ce4495ca16001b43ad1007ad0d4b582fa2498267b79e913d131852ba48bf5b18",
+    "pi_bs_gpu.cu": "295e01c64f4ee91c49ffa812fae558fc5fcf21d9775129fc07daca21d71ac238",
+    "distributed_ntt.cu": "8deebd4fb2e145c209ce1cb4d61aeb1a1fb15f044aec1e83eac90c6368b31f8f",
+    "host_arith.h": "bd77d2ce3a8523a88671791b511f58edc2c809c0172215a2d79dfb8b889c86ae",
+    "pinned_gmp.h": "be0c150927b66cc33f01bc72889da22dfee3efe34796cc4f5b7df4b1005d5c93",
+    "batch_mul_ntt.cu": "9fff969f3dc1c2773a38f3c15d744aa9fd33297dc5307c986e6c6303fa0060c5"
+  },
+  "trials": [
+    {
+      "warmup": false,
+      "elapsed_ms": 26987.923,
+      "process_wall_s": 31.778827804955654,
+      "stdout": "DEC = 31415926535897932384626433832795028841971693993751058209749445923...7719960511914494039945818580686529237500809231062441314758821220\n",
+      "stderr": "reserve_s=8.332397\nbinary_split leaves=5 terms=713031680 leaves_s=5.690004\nmerge nodes=3 seconds=0.754566\nmerge nodes=2 seconds=1.041287\nmerge nodes=1 seconds=0.852470\nbinary_split_s=8.338426\nsqrt_s=1.041458\ndivision_s=5.174890\ndecimal powers_s=0.203060\ndecimal split_s=1.481029\ndecimal leaves_s=2.416518\ndecimal_s=4.100709\nelapsed_ms=26987.923 digits=10000000000 gpus=8\npinned hits=296 misses=1 fallback=0 allocated_GB=68.719 allocation_s=8.332331 arena_peak_GB=68.719 arena_live_peak_GB=64.113\n"
+    }
+  ],
+  "gpus": "name, memory.total [MiB], driver_version, pci.bus_id\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:61:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:62:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:63:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:64:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:A1:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:A2:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:A3:00.0\nNVIDIA RPBZZZ6, 97887 MiB, 580.159.04, 00000000:A4:00.0",
+  "median_ms": 26987.923,
+  "best_ms": 26987.923
+}

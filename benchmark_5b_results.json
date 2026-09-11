@@ -1,0 +1,258 @@
+{
+  "date": "2026-09-10",
+  "device": "RTX Pro 6000 96 GB (user-reported; nvidia-smi: NVIDIA RPBZZZ6)",
+  "compiler": "CUDA 13.0 nvcc -O3",
+  "fractional_digits": 5000000000,
+  "cpu_chart_target_ms": 22377,
+  "cpu_chart_url": "https://www.numberworld.org/y-cruncher/benchmarks/charts/5b.html",
+  "reference": {
+    "digits": 5000000000,
+    "sha256": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72",
+    "ycruncher_computation_s": 98.81,
+    "ycruncher_wall_s": 158.807,
+    "generator": "y-cruncher v0.8.7.9547-static",
+    "verification_enabled": true,
+    "command": "'../ycruncher/y-cruncher v0.8.7.9547-static/y-cruncher' skip-warnings pause:-2 custom pi -dec:5000000000 -hex:0 -verify:1 -o .scratch/reference5b"
+  },
+  "first_correct_version": {
+    "commit": "8a3207a",
+    "benchmark_ms": 25098.055,
+    "profile_ms": 25068.271,
+    "full_output_ms": 25307.137,
+    "full_fractional_sha256": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72",
+    "reference_match": true,
+    "workspace_bytes": 51539607552
+  },
+  "timing_scope": "Arithmetic and decimal conversion; excludes initial CUDA setup, final host transfer, hashing and printing",
+  "final_version": {
+    "commit": "2123917333e79502646a6ccde480a1bec9457771",
+    "warmups_ms": [
+      20298.111
+    ],
+    "times_ms": [
+      20296.213,
+      20297.523,
+      20665.99,
+      20381.312,
+      20291.771
+    ],
+    "median_ms": 20297.523,
+    "best_ms": 20291.771,
+    "worst_ms": 20665.99,
+    "all_trials_below_cpu_chart": true,
+    "median_reduction_vs_cpu_chart_percent": 9.292921303123736,
+    "median_reduction_vs_previous_version_percent": 8.22825090003806,
+    "settings": "Default -O3 build; explicit PTX 96-bit product, shift-based inverse normalization, shorter canonical add/subtract/reduction corrections and const/restrict root pointers; all prior splitting and transform schedules retained",
+    "full_output_ms": 20362.848,
+    "full_fractional_sha256": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72",
+    "reference_match": true
+  },
+  "component_validation": {
+    "shared_multiplication_gmp": "Passed through k25, random/maximal inputs, cyclic tails, broadcast, strides, batch boundaries and fallback",
+    "large_arithmetic": "Passed every-limb maximal products including shared pairs at k31 on 96 GB server; shifts beyond 2^33 bits",
+    "exact_division_chains_gmp": "Passed counts 0,1,2,4,11,22,32; rows 1,33,65; lengths 64,129,512,2048; output padding and invalid arguments",
+    "arithmetic_api": "Passed full suite, including expanded exact division up to 2048 limbs",
+    "common_factor_proof": "generate_common_factors.py --check passed for 34,68,136 terms",
+    "final_pi_boundaries": "21 mpmath comparisons from 0 through 100000 digits passed after modular arithmetic changes",
+    "final_cuda_memcheck": "One million digits on the final local build; zero errors",
+    "modular_primitives_gmp": "131072 cases for multiply/add/subtract/scaling; canonical boundary pairs and every shift 0..32 at each boundary; passed on both RTX 5090 and server GPU",
+    "final_ntt_gmp": "Full --skip-benchmark correctness suite passed: random sizes, identical operands, broadcasts, strides, carry boundaries and multiple workspace batches",
+    "final_shared_multiplication_gmp": "Passed all cases through k25 after final root-pointer annotations",
+    "final_large_arithmetic": "Server k31 passed: every limb of maximal squares, products, unequal operands, cyclic products, both shared-product outputs, and shifts beyond 2^33 bits"
+  },
+  "regressions": {
+    "1000000000": {
+      "sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+      "reference_match": true,
+      "full_output_ms": 3309.063,
+      "warmups_ms": [
+        3206.405
+      ],
+      "times_ms": [
+        3388.219,
+        3171.524,
+        3213.666
+      ],
+      "median_ms": 3213.666,
+      "best_ms": 3171.524,
+      "worst_ms": 3388.219
+    },
+    "2500000000": {
+      "sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+      "reference_match": true,
+      "full_output_ms": 9542.782,
+      "warmups_ms": [
+        9444.552
+      ],
+      "times_ms": [
+        9600.286,
+        9395.885,
+        9677.284
+      ],
+      "median_ms": 9600.286,
+      "best_ms": 9395.885,
+      "worst_ms": 9677.284
+    }
+  },
+  "previous_final_version": {
+    "commit": "d9ba4ea2696d494a60948d80ac3af461fbf8d15b",
+    "warmups_ms": [
+      22164.463
+    ],
+    "times_ms": [
+      22117.398,
+      22350.424,
+      22124.688,
+      22047.592,
+      21998.42
+    ],
+    "median_ms": 22117.398,
+    "best_ms": 21998.42,
+    "worst_ms": 22350.424,
+    "all_trials_below_cpu_chart": true,
+    "median_reduction_vs_cpu_chart_percent": 1.160128703579566,
+    "settings": "Default build and environment; common factors through 136 terms, fused exact-division chains, cached k16/k17/k25 alignment and shared paired transforms",
+    "full_output_ms": 21975.834,
+    "full_fractional_sha256": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72",
+    "reference_match": true
+  },
+  "previous_regressions": {
+    "1000000000": {
+      "sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+      "reference_match": true,
+      "full_output_ms": 3502.571,
+      "warmups_ms": [
+        3527.265
+      ],
+      "times_ms": [
+        3568.156,
+        3561.273,
+        3545.772
+      ],
+      "median_ms": 3561.273,
+      "best_ms": 3545.772,
+      "worst_ms": 3568.156
+    },
+    "2500000000": {
+      "sha256": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+      "reference_match": true,
+      "full_output_ms": 10391.416,
+      "warmups_ms": [
+        10389.528
+      ],
+      "times_ms": [
+        10369.61,
+        10282.135,
+        10392.036
+      ],
+      "median_ms": 10369.61,
+      "best_ms": 10282.135,
+      "worst_ms": 10392.036
+    }
+  },
+  "modular_optimization_experiments": [
+    {
+      "commit": "7e9600c",
+      "change": "Explicit PTX product carry chains",
+      "warmup_ms": 21679.756,
+      "times_ms": [
+        21321.809,
+        21368.951,
+        21589.23
+      ],
+      "median_ms": 21368.951,
+      "retained": true,
+      "full_output_reference_match": true,
+      "full_output_ms": 21223.672
+    },
+    {
+      "commit": "ac123fe",
+      "change": "Precomputed inverse roots",
+      "warmup_ms": 21280.592,
+      "times_ms": [
+        21248.67,
+        21472.605
+      ],
+      "median_ms": 21360.6375,
+      "retained": false,
+      "reason": "No meaningful gain; removed the extra 1.5 MiB of tables"
+    },
+    {
+      "commit": "78c2b22",
+      "change": "Exact shift normalization, inverse tables removed",
+      "warmup_ms": 21057.1,
+      "times_ms": [
+        21218.953,
+        21142.461
+      ],
+      "median_ms": 21180.707,
+      "retained": true
+    },
+    {
+      "commit": "0ce6e2d",
+      "change": "Shorter canonical add/subtract corrections",
+      "warmup_ms": 20561.977,
+      "times_ms": [
+        20771.098,
+        20594.504
+      ],
+      "median_ms": 20682.801,
+      "retained": true
+    },
+    {
+      "commit": "58119af",
+      "change": "Shorter final modular reduction correction",
+      "warmup_ms": 20165.027,
+      "times_ms": [
+        20338.57,
+        20219.432
+      ],
+      "median_ms": 20279.001,
+      "retained": true,
+      "full_output_reference_match": true,
+      "full_output_ms": 20123.324
+    },
+    {
+      "commit": "00c2ba3",
+      "change": "Read-only nonaliasing root pointers",
+      "warmup_ms": 20240.506,
+      "times_ms": [
+        20279.445,
+        20158.801
+      ],
+      "median_ms": 20219.123,
+      "retained": true,
+      "note": "Small timing difference within run variation; annotations express the existing no-alias invariant"
+    }
+  ],
+  "rtx_5090_billion_digits": {
+    "date": "2026-09-10",
+    "device": "NVIDIA GeForce RTX 5090",
+    "driver": "591.86",
+    "compiler": "CUDA 13.1 nvcc V13.1.115",
+    "build": "make -j8 (default -O3; existing binary up to date)",
+    "source_commit": "8c7f85a95e62af0c88814202a4f31b5f21befc45",
+    "command": "python3 benchmark_pi.py --digits 1000000000 --warmups 1 --runs 5",
+    "fractional_digits": 1000000000,
+    "warmups_ms": [
+      3524.498
+    ],
+    "times_ms": [
+      3509.651,
+      3514.0,
+      3531.918,
+      3518.641,
+      3520.995
+    ],
+    "median_ms": 3518.641,
+    "best_ms": 3509.651,
+    "worst_ms": 3531.918,
+    "full_output_ms": 3533.709,
+    "fractional_sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+    "reference_match": true,
+    "validation": "All one billion fractional digits hashed; exact output length and newline checked",
+    "user_reported_original_ms": 4100,
+    "median_reduction_vs_user_reported_original_percent": 14.179487804878043,
+    "timing_scope": "Arithmetic and decimal conversion; excludes initial CUDA setup, final host transfer, hashing and printing"
+  }
+}
