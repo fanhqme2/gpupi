@@ -1,3 +1,4 @@
+#include "pi_device_memory.h"
 #include "convert_decimal.h"
 
 #include <cuda_runtime.h>
@@ -119,23 +120,6 @@ __global__ void extract_low_bits_rows_kernel(
     }
 }
 
-__global__ void assemble_decimal_output_kernel(
-    const char * chunks_reversed,
-    char * output_digits,
-    uint32_t chunk_digits,
-    uint32_t chunk_count
-) {
-    const uint64_t total = (uint64_t)chunk_digits * (uint64_t)chunk_count;
-    for (uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-         tid < total;
-         tid += (uint64_t)blockDim.x * gridDim.x) {
-        const uint32_t chunk = (uint32_t)(tid / chunk_digits);
-        const uint32_t digit = (uint32_t)(tid % chunk_digits);
-        output_digits[(size_t)chunk * chunk_digits + digit] =
-            chunks_reversed[(size_t)chunk * chunk_digits + (chunk_digits - 1u - digit)];
-    }
-}
-
 cudaError_t launch_extract_shifted_rows(
     const BatchMPArray & src,
     BatchMPArray & dst,
@@ -173,23 +157,6 @@ cudaError_t launch_extract_low_bits_rows(
     const uint32_t blocks = (uint32_t)std::min<uint64_t>((total + 255u) / 256u, 65535u);
     extract_low_bits_rows_kernel<<<blocks, 256>>>(
         src.data, src.stride, dst.data, dst.stride, dst.length, rows, top_mask
-    );
-    return cudaGetLastError();
-}
-
-cudaError_t launch_assemble_decimal_output(
-    const char * chunks_reversed,
-    char * output_digits,
-    uint32_t chunk_digits,
-    uint32_t chunk_count
-) {
-    if (chunk_digits == 0u || chunk_count == 0u) {
-        return cudaSuccess;
-    }
-    const uint64_t total = (uint64_t)chunk_digits * (uint64_t)chunk_count;
-    const uint32_t blocks = (uint32_t)std::min<uint64_t>((total + 255u) / 256u, 65535u);
-    assemble_decimal_output_kernel<<<blocks, 256>>>(
-        chunks_reversed, output_digits, chunk_digits, chunk_count
     );
     return cudaGetLastError();
 }
@@ -332,7 +299,7 @@ cudaError_t convert_decimal_equal_split(
         }
         mantissa_words = std::max(mantissa_words,
             ((size_t)1u << levels) * limbs_per_level[levels]);
-        cudaError_t err = cudaMalloc(&arena.array.data,
+        cudaError_t err = pi_memory::allocate(&arena.array.data,
             (next_words * 2u + mantissa_words + product_words) * sizeof(uint32_t));
         if (err != cudaSuccess) return err;
     }
@@ -458,31 +425,17 @@ cudaError_t convert_decimal_equal_split(
         return err;
     }
 
-    const size_t chunk_bytes = (size_t)current.batch_size * leaf_digits;
-    char * chunks_reversed = nullptr;
-    err = cudaMalloc(&chunks_reversed, chunk_bytes);
-    if (err != cudaSuccess) {
-        cleanup_current();
-        return err;
-    }
-
     batch_decimal_naive(
         aligned.array.data,
-        chunks_reversed,
+        output_digits,
         current.batch_size,
         (int)aligned.array.length,
         aligned.array.stride,
         (int)leaf_digits,
-        leaf_digits
+        leaf_digits,
+        true
     );
     err = cudaGetLastError();
-    if (err == cudaSuccess) {
-        err = launch_assemble_decimal_output(
-            chunks_reversed, output_digits, leaf_digits, current.batch_size
-        );
-    }
-
-    cudaFree(chunks_reversed);
     cleanup_current();
     return err;
 }

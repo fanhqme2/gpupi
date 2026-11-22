@@ -160,5 +160,318 @@
     "common_factors": "Exhaustive residue proof passed for 34, 68, 136 terms",
     "cuda_memcheck": "One million digits; zero errors",
     "full_output": "All one billion fractional digits match the reference SHA-256; exact length and newline checked"
+  },
+  "rtx_5090_2026_11_19": {
+    "digits": 1000000000,
+    "gpu": "NVIDIA GeForce RTX 5090, 32 GB",
+    "driver": "610.88",
+    "compiler": "CUDA 13.1 nvcc V13.1.115, default -O3",
+    "command": "./pi_bs_gpu 1000000000 --benchmark",
+    "method": "Separate processes on one GPU. One warmup per executable, then five measured pairs, alternating which executable ran first. Profiling and full-output checks were separate runs.",
+    "original": {
+      "warmup_ms": 3492.73,
+      "warmup_wall_ms": 4248.035,
+      "elapsed_ms": [
+        3498.05,
+        3495.787,
+        3503.25,
+        3499.257,
+        3500.027
+      ],
+      "median_ms": 3499.257,
+      "best_ms": 3495.787,
+      "wall_ms": [
+        4202.379,
+        4203.225,
+        4206.766,
+        4201.235,
+        4210.657
+      ],
+      "median_wall_ms": 4203.225,
+      "profile_stages_ms": {
+        "leaf_total_ms": 2.795,
+        "mul_total_ms": 2796.616,
+        "mul_small_total_ms": 0.0,
+        "shift_total_ms": 5.391,
+        "add_total_ms": 59.252,
+        "sub_total_ms": 15.738,
+        "compact_total_ms": 44.438,
+        "exactdiv_total_ms": 23.556,
+        "decimal_powers_total_ms": 22.383,
+        "decimal_convert_total_ms": 291.635,
+        "ntt_total_ms": 2787.107
+      },
+      "nsight_systems_whole_command": {
+        "kernel_launches": 20246,
+        "sum_of_kernel_durations_ms": 3017.6
+      }
+    },
+    "optimized": {
+      "warmup_ms": 3109.724,
+      "warmup_wall_ms": 3599.285,
+      "elapsed_ms": [
+        2933.789,
+        2936.068,
+        2938.956,
+        2944.176,
+        2946.156
+      ],
+      "median_ms": 2938.956,
+      "best_ms": 2933.789,
+      "wall_ms": [
+        3399.455,
+        3434.816,
+        3409.047,
+        3406.446,
+        3406.758
+      ],
+      "median_wall_ms": 3406.758,
+      "profile_stages_ms": {
+        "leaf_total_ms": 2.658,
+        "mul_total_ms": 2287.454,
+        "mul_small_total_ms": 0.0,
+        "shift_total_ms": 5.441,
+        "add_total_ms": 55.044,
+        "sub_total_ms": 14.49,
+        "compact_total_ms": 43.174,
+        "exactdiv_total_ms": 114.741,
+        "decimal_powers_total_ms": 13.612,
+        "decimal_convert_total_ms": 235.86,
+        "ntt_total_ms": 2278.412
+      },
+      "nsight_systems_whole_command": {
+        "kernel_launches": 20965,
+        "sum_of_kernel_durations_ms": 2687.615
+      }
+    },
+    "earlier_factor_depth_on_optimized_build": {
+      "environment": "GPUPI_COMMON_FACTORS=136",
+      "digits": 1000000000,
+      "times_ms": [
+        3003.82,
+        3008.348,
+        3012.654
+      ],
+      "median_ms": 3008.348,
+      "best_ms": 3003.82,
+      "worst_ms": 3012.654
+    },
+    "experiments": [
+      "Compared exact common-factor cancellation at 272, 2176, 4352, 8704, 17408, 34816 and 69632 terms during development. Selected 8704 for the large tree.",
+      "Compared wide multiply-add modular arithmetic, a uniform radix-256 schedule, and the original mixed schedule. Retained the existing modular product and mixed schedule.",
+      "Swept root tables of 2^20 through 2^24 entries, radix-256 tile widths, register limits, individual-product cutoffs and transform batch budgets. Selected a 2^21-entry root table and a 16-column register tile with a 512-thread, two-block launch bound."
+    ],
+    "verification": {
+      "fractional_sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+      "matched_original_full_decimal_at_digits": [
+        0,
+        1,
+        477,
+        575,
+        576,
+        577,
+        1000000,
+        250000000,
+        500000000
+      ],
+      "large_block_divisor": "148375 bits. Independently checked every starting residue for 1104 contributing or candidate prime powers against the leaf factors and earlier cancellations.",
+      "gmp_suites": [
+        "batch_mul_ntt_test --skip-benchmark",
+        "shared_mul_test",
+        "convert_decimal_test --skip-full"
+      ],
+      "original_ret_guard_hash": 880022981,
+      "optimized_ret_guard_hash": 979593057
+    }
+  },
+  "rtx_5090_2026_11_19_followup": {
+    "digits": 1000000000,
+    "gpu": "NVIDIA GeForce RTX 5090, 32 GB",
+    "compiler": "CUDA 13.1, default -O3",
+    "command": "./pi_bs_gpu 1000000000 --benchmark",
+    "method": "One warmup per executable followed by five measured rounds. Original, previous optimization, and current executable ran serially, reversing order each round. Process wall time includes startup and output.",
+    "original": {
+      "warmup_ms": 3508.169,
+      "warmup_wall_ms": 4383.386,
+      "elapsed_ms": [
+        3512.052,
+        3508.932,
+        3510.031,
+        3513.938,
+        3517.899
+      ],
+      "median_ms": 3512.052,
+      "best_ms": 3508.932,
+      "wall_ms": [
+        4208.753,
+        4326.315,
+        4227.797,
+        4325.115,
+        4259.689
+      ],
+      "median_wall_ms": 4259.689
+    },
+    "previous_optimization": {
+      "warmup_ms": 2940.849,
+      "warmup_wall_ms": 3395.174,
+      "elapsed_ms": [
+        2942.757,
+        2947.926,
+        2952.431,
+        2948.196,
+        2945.533
+      ],
+      "median_ms": 2947.926,
+      "best_ms": 2942.757,
+      "wall_ms": [
+        3401.334,
+        3411.685,
+        3406.777,
+        3400.297,
+        3397.727
+      ],
+      "median_wall_ms": 3401.334
+    },
+    "current": {
+      "warmup_ms": 2644.691,
+      "warmup_wall_ms": 3111.822,
+      "elapsed_ms": [
+        2650.604,
+        2657.801,
+        2651.761,
+        2647.204,
+        2651.095
+      ],
+      "median_ms": 2651.095,
+      "best_ms": 2647.204,
+      "wall_ms": [
+        3088.475,
+        3135.784,
+        3119.101,
+        3116.266,
+        3128.278
+      ],
+      "median_wall_ms": 3119.101
+    },
+    "current_stage_profile_ms": {
+      "leaf_total_ms": 2.711,
+      "mul_total_ms": 2021.276,
+      "mul_small_total_ms": 0.0,
+      "shift_total_ms": 4.82,
+      "add_total_ms": 33.34,
+      "sub_total_ms": 12.879,
+      "compact_total_ms": 34.074,
+      "exactdiv_total_ms": 114.393,
+      "decimal_powers_total_ms": 11.372,
+      "decimal_convert_total_ms": 236.097,
+      "ntt_total_ms": 2012.599
+    },
+    "experiments": [
+      "Compared final row-by-row merges starting at 2, 4, 8, 16 and 32 rows. Selected four with the fused middle levels and measured each row before applying the precision bound.",
+      "Compared merge batch budgets of 1.5, 3, 6, 12 and 24 million coefficients. Kept 6 million.",
+      "Compared cyclic tail limits K/8, K/6, K/4 and K/3. Selected K/4, then fused the local forward transforms, multiplication and inverse for reversed tails. Large tails read the high limbs directly and write just the required coefficients.",
+      "Three register-resident butterfly levels were slower than two. Fusing a separate spectral multiplication into the forward store also did not improve the measured median."
+    ],
+    "fractional_sha256": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+    "nsight_systems_whole_command": {
+      "kernel_launches": 19671,
+      "sum_of_kernel_durations_ms": 2386.906
+    },
+    "verification": {
+      "matched_original_full_decimal_at_digits": [
+        0,
+        1,
+        477,
+        575,
+        576,
+        577,
+        1000000,
+        250000000,
+        500000000
+      ],
+      "matched_previous_full_decimal_at_digits": [
+        765432123,
+        1010000003
+      ],
+      "gmp_suites": [
+        "batch_mul_ntt_test --skip-benchmark",
+        "shared_mul_test including maximal limbs and missing final P",
+        "convert_decimal_test --skip-full"
+      ],
+      "compute_sanitizer_memcheck": "Zero errors for fused split merges and large reversed tails, including broadcast operands and maximal limbs."
+    }
+  },
+  "rtx_5090_release_2026_11_22": {
+    "gpu": "NVIDIA GeForce RTX 5090, 32 GB",
+    "driver": "610.88",
+    "compiler": "CUDA 13.1, nvcc V13.1.115, default -O3",
+    "method": "One warmup and three measured serial processes per size using benchmark_pi.py. Times include computation and decimal conversion. Full-output verification ran separately.",
+    "benchmarks": [
+      {
+        "digits": 250000000,
+        "times_ms": [
+          622.03,
+          620.085,
+          619.684
+        ],
+        "median_ms": 620.085,
+        "best_ms": 619.684,
+        "worst_ms": 622.03,
+        "warmup_ms": 613.656
+      },
+      {
+        "digits": 500000000,
+        "times_ms": [
+          1299.332,
+          1304.498,
+          1310.858
+        ],
+        "median_ms": 1304.498,
+        "best_ms": 1299.332,
+        "worst_ms": 1310.858,
+        "warmup_ms": 1300.539
+      },
+      {
+        "digits": 1000000000,
+        "times_ms": [
+          2648.006,
+          2643.161,
+          2638.889
+        ],
+        "median_ms": 2643.161,
+        "best_ms": 2638.889,
+        "worst_ms": 2648.006,
+        "warmup_ms": 2630.362
+      },
+      {
+        "digits": 2500000000,
+        "times_ms": [
+          8243.835,
+          8245.973,
+          8245.625
+        ],
+        "median_ms": 8245.625,
+        "best_ms": 8243.835,
+        "worst_ms": 8245.973,
+        "warmup_ms": 8239.039
+      },
+      {
+        "digits": 5000000000,
+        "times_ms": [
+          20752.328,
+          20777.98,
+          20787.42
+        ],
+        "median_ms": 20777.98,
+        "best_ms": 20752.328,
+        "worst_ms": 20787.42,
+        "warmup_ms": 20739.297
+      }
+    ],
+    "full_fractional_sha256": {
+      "1000000000": "ef0a513ee398d5dbe1ed6994c222e03a16fcfe91f5de685691953d35961798e5",
+      "2500000000": "5753752acbbf07c3414331c3b9121b16dd910e426a5eb014d0b8f31a78da4059",
+      "5000000000": "435c9b2f0794ae48141c831500c2aa7f4464e68823916012e7128df27cfe0a72"
+    }
   }
 }

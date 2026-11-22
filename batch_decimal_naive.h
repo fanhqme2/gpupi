@@ -11,7 +11,7 @@ constexpr int BATCH_DECIMAL_NAIVE_L_LIMB_MAX = 2047;
 //
 // A has L_limb words with stride_A words per batch item.
 // B receives L_dec ASCII decimal digits per item with stride_B bytes per item.
-// Digits are written least-significant-first, without a decimal point or
+// Digits are written least-significant-first by default, without a decimal point or
 // terminator. For example, X = 2^(32 * L_limb - 1) produces "...0005" in the
 // mathematical decimal expansion but writes "000...005" with the 5 at index
 // L_dec - 1 only when enough digits are requested; the first output byte is the
@@ -28,4 +28,10 @@ void batch_decimal_naive(
     uint32_t stride_A,
     int L_dec,
     uint32_t stride_B
+);
+
+// Write each row in display order when most_significant_first is true.
+void batch_decimal_naive(
+    const uint32_t *A, char *B, uint32_t N, int L_limb, uint32_t stride_A,
+    int L_dec, uint32_t stride_B, bool most_significant_first
 );

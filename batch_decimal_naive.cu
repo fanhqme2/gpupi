@@ -22,7 +22,8 @@ __global__ void batch_decimal_naive_kernel(
     int L_limb,
     uint32_t stride_A,
     int L_dec,
-    uint32_t stride_B
+    uint32_t stride_B,
+    bool most_significant_first
 ) {
     __shared__ uint32_t prop[max_chunk / 64];
     __shared__ uint32_t out_value;
@@ -76,8 +77,8 @@ __global__ void batch_decimal_naive_kernel(
             __syncthreads();
             const int out_idx_len = min(9, L_dec - start_idx);
             if (my_idx < out_idx_len){
-                const int out_pos = L_dec - start_idx - out_idx_len;
-                B[(size_t)idx * stride_B + out_pos + my_idx] = out_value / power_10[my_idx + (9 - out_idx_len)] % 10u + '0';
+                const int out_pos = L_dec - start_idx - out_idx_len + my_idx;
+                B[(size_t)idx * stride_B + (most_significant_first ? L_dec - 1 - out_pos : out_pos)] = out_value / power_10[my_idx + (9 - out_idx_len)] % 10u + '0';
             }
             __syncthreads();
         }
@@ -92,7 +93,8 @@ __global__ void batch_decimal_naive_kernel2(
     int L_limb,
     uint32_t stride_A,
     int L_dec,
-    uint32_t stride_B
+    uint32_t stride_B,
+    bool most_significant_first
 ) {
     __shared__ uint32_t prop[max_warps * 2];
     __shared__ uint32_t read_buf[32];
@@ -162,7 +164,7 @@ __global__ void batch_decimal_naive_kernel2(
             ret /= 10;
             const int out_pos = L_dec - (my_idx * 2 + 1) * 9 + i;
             if (out_pos >= 0 && out_pos < L_dec){
-                B[(size_t)idx * stride_B + out_pos] = digit;
+                B[(size_t)idx * stride_B + (most_significant_first ? L_dec - 1 - out_pos : out_pos)] = digit;
             }
         }
         for (int i = 0; i < 9; i ++){
@@ -170,7 +172,7 @@ __global__ void batch_decimal_naive_kernel2(
             ret_2 /= 10;
             const int out_pos = L_dec - (my_idx * 2 + 2) * 9 + i;
             if (out_pos >= 0 && out_pos < L_dec){
-                B[(size_t)idx * stride_B + out_pos] = digit;
+                B[(size_t)idx * stride_B + (most_significant_first ? L_dec - 1 - out_pos : out_pos)] = digit;
             }
         }
     }
@@ -183,7 +185,8 @@ __global__ void batch_decimal_naive_warps(
     int L_limb,
     uint32_t stride_A,
     int L_dec,
-    uint32_t stride_B
+    uint32_t stride_B,
+    bool most_significant_first
 ) {
     uint32_t read_word = 0;
     const int my_idx = threadIdx.x & 31;
@@ -235,7 +238,7 @@ __global__ void batch_decimal_naive_warps(
             ret /= 10;
             const int out_pos = L_dec - (my_idx * 2 + 1) * 9 + i;
             if (out_pos >= 0 && out_pos < L_dec){
-                B[(size_t)idx * stride_B + out_pos] = digit;
+                B[(size_t)idx * stride_B + (most_significant_first ? L_dec - 1 - out_pos : out_pos)] = digit;
             }
         }
         for (int i = 0; i < 9; i ++){
@@ -243,7 +246,7 @@ __global__ void batch_decimal_naive_warps(
             ret_2 /= 10;
             const int out_pos = L_dec - (my_idx * 2 + 2) * 9 + i;
             if (out_pos >= 0 && out_pos < L_dec){
-                B[(size_t)idx * stride_B + out_pos] = digit;
+                B[(size_t)idx * stride_B + (most_significant_first ? L_dec - 1 - out_pos : out_pos)] = digit;
             }
         }
     }
@@ -258,7 +261,8 @@ void batch_decimal_naive(
     int L_limb,
     uint32_t stride_A,
     int L_dec,
-    uint32_t stride_B
+    uint32_t stride_B,
+    bool most_significant_first
 ) {
     if (N == 0 || L_limb <= 0 || L_dec <= 0) {
         return;
@@ -270,7 +274,7 @@ void batch_decimal_naive(
 
     if (L_dec <= 576 && !std::getenv("GPUPI_OLD_DECIMAL")) {
         batch_decimal_naive_warps<<<std::min<uint32_t>((N+7)/8,65535),256>>>(
-            A,B,N,L_limb,stride_A,L_dec,stride_B);
+            A,B,N,L_limb,stride_A,L_dec,stride_B,most_significant_first);
         return;
     }
 
@@ -283,7 +287,7 @@ void batch_decimal_naive(
         const uint32_t num_blocks = std::min<uint32_t>(N, 65535u);
 
         batch_decimal_naive_kernel<2048><<<num_blocks, block>>>(
-            A, B, N, L_limb, stride_A, L_dec, stride_B
+            A, B, N, L_limb, stride_A, L_dec, stride_B, most_significant_first
         );
     }else{
         const int threads_needed = (L_dec + 17) / 18;
@@ -291,7 +295,19 @@ void batch_decimal_naive(
         const dim3 block(kWarpSize, (unsigned)warps_per_block, 1u);
         const uint32_t num_blocks = std::min<uint32_t>(N, 65535u);
         batch_decimal_naive_kernel2<32><<<num_blocks, block>>>(
-            A, B, N, L_limb, stride_A, L_dec, stride_B
+            A, B, N, L_limb, stride_A, L_dec, stride_B, most_significant_first
         );
     }
+}
+
+void batch_decimal_naive(
+    const uint32_t * A,
+    char * B,
+    uint32_t N,
+    int L_limb,
+    uint32_t stride_A,
+    int L_dec,
+    uint32_t stride_B
+) {
+    batch_decimal_naive(A, B, N, L_limb, stride_A, L_dec, stride_B, false);
 }

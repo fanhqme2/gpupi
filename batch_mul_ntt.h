@@ -2,10 +2,15 @@
 
 #include <stdint.h>
 
+constexpr uint32_t kRootTableBits = 21;
+
 struct NTTPrecomputedTables{
     uint3 * roots_table_lv1; // size: 65536
     uint3 * roots_table_lv2; // size: 65536
     uint3 * inv2n_table; // size: 33
+    uint3 * expanded = nullptr; // optional: 2^kRootTableBits entries
+    const uint3 *local_roots() const { return expanded ? expanded : roots_table_lv2; }
+    uint32_t local_mask() const { return expanded ? (1u << kRootTableBits) - 1 : 65535; }
 };
 
 void init_ntt_precomputed_tables(NTTPrecomputedTables * tables);
@@ -53,3 +58,9 @@ size_t batch_mul_ntt_shared_b_workspace_size(uint32_t N, uint32_t La, uint32_t L
 // Requires a nonzero shared workspace size and nonaliasing output arrays.
 void batch_mul_ntt_shared_b(NTTProduct a, NTTProduct c, uint32_t *B, uint32_t Lb,
     uint32_t sb, uint32_t N, uint32_t *workspace, NTTPrecomputedTables tables);
+
+struct BatchMPArray;
+size_t batch_ntt_merge_workspace(BatchMPArray po, BatchMPArray qo, BatchMPArray ro);
+void batch_ntt_merge(BatchMPArray p, BatchMPArray q, BatchMPArray r, BatchMPArray shifted,
+    BatchMPArray po, BatchMPArray qo, BatchMPArray ro, uint32_t *workspace, size_t bytes,
+    NTTPrecomputedTables tables);

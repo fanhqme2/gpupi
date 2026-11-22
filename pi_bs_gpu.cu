@@ -1,3 +1,4 @@
+#include "pi_device_memory.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include "batch_arith.h"
 #include "convert_decimal.h"
 #include "batch_mul_naive.h"
+#include "batch_mul_ntt.h"
 
 __device__ __forceinline__ void reduce_gcd_quotient(uint32_t &a, uint32_t &b){
     if (a % 3 == 0 && b % 3 == 0){
@@ -152,6 +154,7 @@ struct StageProfiler {
 
 namespace {
 
+constexpr uint32_t kLargeBlockTerms = 8704;
 constexpr uint32_t kBlockCommonDivisorLo = 830297u;
 constexpr uint32_t kBlockCommonDivisorHi = 156590819u;
 // Guaranteed common factors beyond the original 17-term block cancellation.
@@ -516,15 +519,223 @@ cudaError_t profile_decimal_convert(
         } \
     } while (0)
 
+// Multiply prime powers in a balanced tree so GMP can use fast multiplication.
+static void factor_product(mpz_t out, const std::vector<uint2> &factors,
+    size_t first, size_t last) {
+    if (last - first == 1) {
+        mpz_ui_pow_ui(out, factors[first].x, factors[first].y);
+        return;
+    }
+    const size_t middle = first + (last - first) / 2;
+    mpz_t right;
+    mpz_init(right);
+    factor_product(out, factors, first, middle);
+    factor_product(right, factors, middle, last);
+    mpz_mul(out, out, right);
+    mpz_clear(right);
+}
+
+// For each odd prime power m coprime to the leaf constants, a term of R
+// uses a prefix of P factors followed by a suffix of Q factors. In each
+// period the three numerator factors occur at floor(m/6), floor(m/2),
+// floor(5m/6), and all three denominator factors at m-1. Completed
+// periods therefore contribute equally on either side of the split.
+// In [a,b), any split at s contributes 3*(floor(b/m)-floor(a/m))
+// minus the numerator prefix at a mod m, plus the prefix at s mod m.
+// The latter is nonnegative. Crossing an extra period gains three factors,
+// enough to cover even the largest starting prefix.
+static void block_common_divisor(mpz_t divisor, uint32_t terms) {
+    std::vector<bool> composite(terms + 1);
+    std::vector<uint2> powers;
+    auto valuation = [](uint32_t value, uint32_t p) {
+        uint32_t e = 0;
+        while (value % p == 0) { ++e; value /= p; }
+        return e;
+    };
+    for (uint32_t p = 2; p <= terms; ++p) {
+        if (composite[p]) continue;
+        for (uint32_t j = p + p; j <= terms; j += p) composite[j] = true;
+        if (p <= 5 || p == 23 || p == 29) continue;
+        uint32_t exponent = 0;
+        for (uint64_t m = p; m <= terms; m *= p) {
+            // With no extra denominator period, the largest possible
+            // starting residue is m-1-(terms % m). Discount its prefix.
+            const uint32_t start = m - 1 - terms % m;
+            exponent += 3 * (terms / m) - (m / 6 < start) -
+                (m / 2 < start) - (5 * m / 6 < start);
+        }
+        uint32_t removed = 8 * (valuation(kBlockCommonDivisorLo, p) + valuation(kBlockCommonDivisorHi, p));
+        for (auto f : kCommon34) removed += 4 * valuation(f, p);
+        for (auto f : kCommon68) removed += 2 * valuation(f, p);
+        for (auto f : kCommon136) removed += valuation(f, p);
+        removed *= terms / 136;
+        if (exponent > removed) powers.push_back(make_uint2(p, exponent - removed));
+    }
+    factor_product(divisor, powers, 0, powers.size());
+}
+
+// Use the low limbs of X * D^-1 mod 2^k for the exact quotient X/D.
+// The same odd divisor applies to every row and all three columns.
+static cudaError_t cancel_block_factor(BatchMPContext *ctx, uint32_t terms,
+    BatchMPArray &P, BatchMPArray &Q, BatchMPArray &R, uint32_t *scratch, size_t capacity) {
+    mpz_t divisor, residual, inverse;
+    mpz_inits(divisor, residual, inverse, nullptr);
+    block_common_divisor(divisor, terms);
+    const uint32_t saved = (mpz_sizeinbase(divisor, 2) - 1) / 32;
+    const uint32_t length = std::max({P.length, Q.length, R.length});
+    // A different precision may have different row lengths. Skip this
+    // optional reduction if the existing binary-split scratch cannot hold it.
+    for (const auto &column : {P, Q, R}) {
+        if (column.batch_size && (column.length <= saved ||
+            (size_t)(length - saved) + 2ull * (column.length - saved) * column.batch_size > capacity)) {
+            mpz_clears(divisor, residual, inverse, nullptr);
+            return cudaSuccess;
+        }
+    }
+    const uint32_t words = length - saved;
+    // Newton lifting doubles the correct low bits at each iteration:
+    // 1 - D*x' = (1 - D*x)^2 for x' = x*(2 - D*x).
+    const mp_bitcnt_t bits = (mp_bitcnt_t)32 * words;
+    mpz_set_ui(inverse, 1);
+    for (mp_bitcnt_t n = 1; n < bits; n *= 2) {
+        const mp_bitcnt_t next = std::min(2 * n, bits);
+        mpz_fdiv_r_2exp(residual, divisor, next);
+        mpz_mul(residual, residual, inverse);
+        mpz_fdiv_r_2exp(residual, residual, next);
+        mpz_ui_sub(residual, 2, residual);
+        mpz_mul(inverse, inverse, residual);
+        mpz_fdiv_r_2exp(inverse, inverse, next);
+    }
+    std::vector<uint32_t> host(words);
+    mpz_export(host.data(), nullptr, -1, 4, 0, 0, inverse);
+    mpz_clears(divisor, residual, inverse, nullptr);
+
+    cudaError_t err = cudaMemcpy(scratch, host.data(), words * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) return err;
+    for (auto *column : {&P, &Q, &R}) {
+        if (!column->batch_size) continue;
+        auto low = *column;
+        low.length -= saved;
+        BatchMPArray factor{scratch, low.length, low.batch_size, 0};
+        BatchMPArray product{scratch + words, 2 * low.length, low.batch_size, 2 * low.length};
+        err = batch_mp_mul(ctx, low, factor, product);
+        if (err != cudaSuccess) return err;
+        err = cudaMemcpy2DAsync(low.data, low.stride * sizeof(uint32_t),
+            product.data, product.stride * sizeof(uint32_t), low.length * sizeof(uint32_t),
+            low.batch_size, cudaMemcpyDeviceToDevice);
+        if (err != cudaSuccess) return err;
+        column->length = low.length;
+    }
+    return cudaSuccess;
+}
+
+// A subtree starting at term a contributes through the preceding product
+// of Chudnovsky ratios. Each ratio, including its implicit power of two,
+// is at most 1728 / 640320^3 < 10^-14.18. A joint limb cut introduces
+// relative error below 2^(32*(1-keep)) in Q, and the same absolute
+// bound in P/Q from rounding P. The 16 guard limbs cover the linear
+// term, the partially occupied top limb, and rounding across the batch and forest merges.
+struct SplitRow { BatchMPArray p, q, r; };
+
+static cudaError_t trim_split_row(BatchMPContext *ctx, SplitRow &node,
+    uint32_t term_offset, uint64_t digits) {
+    for (auto *col : {&node.p, &node.q, &node.r}) {
+        if (!col->data) continue;
+        cudaError_t err = col->compact(ctx);
+        if (err != cudaSuccess) return err;
+    }
+    if (!digits) return cudaSuccess;
+    const int64_t remaining = (int64_t)digits - (int64_t)1418 * term_offset / 100;
+    const uint32_t keep = 16 + (uint32_t)ceil(std::max<int64_t>(0, remaining) * (3.322 / 32.0));
+    uint32_t drop = node.q.length > keep ? node.q.length - keep : 0;
+    if (node.p.data) drop = std::min(drop, node.p.length ? node.p.length - 1 : 0);
+    drop = std::min(drop, node.r.length);
+    for (auto *col : {&node.p, &node.q, &node.r}) {
+        if (col->data) {
+            col->data += drop;
+            col->length -= drop;
+            col->stride = col->length;
+        }
+    }
+    return cudaSuccess;
+}
+
+static cudaError_t finish_split(BatchMPContext *ctx, uint32_t rows,
+    uint32_t terms, uint32_t term_offset, bool need_p, uint64_t digits, BatchMPArray &P, BatchMPArray &Q,
+    BatchMPArray &R, BatchMPArray &p_next, BatchMPArray &q_next,
+    BatchMPArray &r_next, uint32_t *rq_data, uint32_t *pr_data,
+    StageProfiler *profiler) {
+    auto view = [](uint32_t *ptr, uint32_t len) -> BatchMPArray {
+        return {ptr, len, 1, len};
+    };
+    std::vector<SplitRow> current(rows);
+    for (uint32_t i = 0; i < rows; ++i) {
+        if (need_p || i + 1 < rows) current[i].p = view(P.data + (size_t)i * P.stride, P.length);
+        current[i].q = view(Q.data + (size_t)i * Q.stride, Q.length);
+        current[i].r = view(R.data + (size_t)i * R.stride, R.length);
+    }
+    while (rows > 1) {
+        auto *pd = p_next.data, *qd = q_next.data, *rd = r_next.data;
+        const uint32_t span = terms / rows;
+        for (uint32_t i = 0; i < rows; ++i) {
+            cudaError_t err = trim_split_row(ctx, current[i], term_offset + i * span, digits);
+            if (err != cudaSuccess) return err;
+        }
+        for (uint32_t i = 0; i < rows / 2; ++i) {
+            auto left = current[2 * i], right = current[2 * i + 1];
+            auto q = view(qd, left.q.length + right.q.length);
+            auto rq = view(rq_data, left.r.length + right.q.length);
+            auto pr = view(pr_data, left.p.length + right.r.length);
+            BatchMPArray p{};
+            cudaError_t err = profile_stage("mul", "trim_Q_RQ", rows, 1,
+                left.q.length, right.q.length, true, profiler, [&]() {
+                    return batch_mp_mul_shared_b(ctx, left.q, left.r, right.q, q, rq);
+                });
+            if (err != cudaSuccess) return err;
+            if (right.p.data) {
+                p = view(pd, left.p.length + right.p.length);
+                pd += p.length;
+                err = profile_stage("mul", "trim_P_PR", rows, 1, left.p.length,
+                    right.p.length, true, profiler, [&]() {
+                        return batch_mp_mul_shared_b(ctx, right.p, right.r, left.p, p, pr);
+                    });
+            } else {
+                err = profile_mul(ctx, left.p, right.r, pr, "trim_PR", rows, profiler);
+            }
+            if (err != cudaSuccess) return err;
+            const uint32_t shift = 15u * span;
+            auto r = view(rd, std::max(rq.length + (shift + 31) / 32, pr.length) + 1);
+            err = profile_shift_addsub(ctx, rq, pr, r, shift, false, rows, profiler);
+            if (err != cudaSuccess) return err;
+            current[i] = {p, q, r};
+            qd += q.length;
+            rd += r.length;
+        }
+        std::swap(P, p_next);
+        std::swap(Q, q_next);
+        std::swap(R, r_next);
+        rows /= 2;
+    }
+    if (need_p) P = current.front().p;
+    Q = current.front().q;
+    R = current.front().r;
+    cudaError_t err = Q.compact(ctx);
+    return err == cudaSuccess ? R.compact(ctx) : err;
+}
+
 // do binary splitting for N * 17 elements, where N is a power of 2
-cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr, uint32_t block_offset = 0, BatchMPArray *P_out = nullptr){
+cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &Q, BatchMPArray &R, StageProfiler * profiler = nullptr, uint32_t block_offset = 0, BatchMPArray *P_out = nullptr, uint64_t digits = 0){
     if (context == nullptr || N <= 0 || (N & (N - 1)) != 0) {
         return cudaErrorInvalidValue;
     }
     const uint32_t extra_common_limit = getenv("GPUPI_COMMON_FACTORS")
-        ? (uint32_t)strtoul(getenv("GPUPI_COMMON_FACTORS"), nullptr, 10) : 136;
-    // pre-allocate workspace for the 2^28 case
-    cudaError_t workspace_err = batch_mp_ensure_workspace(context, 6442450944ull);
+        ? (uint32_t)strtoul(getenv("GPUPI_COMMON_FACTORS"), nullptr, 10) : kLargeBlockTerms;
+    // Reserve both root transforms and their carry scratch before building the
+    // tree. Growing a multi-GiB allocation at the final merge is expensive.
+    const uint32_t root_operand = std::min((uint32_t)N, 1u << 22) * 32u;
+    const size_t reserve = batch_mul_ntt_shared_b_workspace_size(
+        1, root_operand, root_operand, root_operand);
+    cudaError_t workspace_err = batch_mp_ensure_workspace(context, reserve);
     if (workspace_err != cudaSuccess) return workspace_err;
 
     BatchMPArray P0 = {};
@@ -540,13 +751,9 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     BatchMPArray R_prod_2{};
 
     uint32_t * temp_prod_workspace = nullptr;
-    cudaError_t temp_workspace_err = cudaMalloc(&temp_prod_workspace,(
-        N * 3ull + 
-        N * 4ull +
-        N * 6ull +
-        N * 88ull +
-        N * 72ull
-    ) * 4);
+    const size_t temp_words = (size_t)N * (3 + 4 + 6 + 88 + 72);
+    cudaError_t temp_workspace_err = pi_memory::allocate(&temp_prod_workspace,
+        temp_words * sizeof(uint32_t));
     if (temp_workspace_err != cudaSuccess || temp_prod_workspace == nullptr) {
         return temp_workspace_err != cudaSuccess ? temp_workspace_err : cudaErrorMemoryAllocation;
     }
@@ -565,7 +772,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         release_array(P_next);
         release_array(Q_next);
         release_array(R_next);
-        cudaFree(temp_prod_workspace_base);
+        pi_memory::release(temp_prod_workspace_base);
     };
 
     P0 = {.data = temp_prod_workspace, .length = 3, .batch_size = (uint32_t)N,  .stride = 3};
@@ -641,6 +848,13 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     }
 
     for (uint32_t n1 = (uint32_t)n; n1 > 1; n1 >>= 1){
+        constexpr uint32_t trim_rows = 4;
+        if (digits && N >= (1 << 20) && n1 == trim_rows) {
+            err = finish_split(context, n1, (uint32_t)N * 17, block_offset * 17, P_out != nullptr, digits, P, Q, R,
+                P_next, Q_next, R_next, R_prod_1.data, R_prod_2.data, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            break;
+        }
         /*
         p = p1 * p2
         q = q1 * q2
@@ -704,6 +918,28 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         R_prod_1.length = R.length + Q.length;
         R_prod_1.stride = R.length + Q.length;
 
+        const uint32_t shift_amount = 15u * ((n / n1) + ((n / n1) >> 4));
+        if (N >= (1 << 22) && n1 <= (uint32_t)N / 512 && n1 >= 4) {
+            auto shifted = R_prod_1;
+            shifted.length = shifted.stride = R.length + shift_amount / 32;
+            R_next.batch_size = Q_next.batch_size;
+            R_next.length = R_next.stride = std::max(shifted.length + Q.length, P.length + R.length) + 1;
+            err = profile_stage("mul", "merged_PQR", n1, Q_next.batch_size,
+                P.length, Q.length, true, profiler, [&]() {
+                    cudaError_t status = batch_mp_shift_bits(context, R_even, shifted, shift_amount);
+                    if (status != cudaSuccess) return status;
+                    return batch_mp_split_merge(context, P, Q, R, shifted, P_next, Q_next, R_next);
+                });
+            if (err != cudaErrorNotSupported) {
+                CHECK_AND_RETURN(err, release_all());
+                // These are upper bounds. The final rows are compacted before
+                // selecting precision, so intermediate scans are unnecessary.
+                std::swap(P, P_next);
+                std::swap(Q, Q_next);
+                std::swap(R, R_next);
+                continue;
+            }
+        }
         err = profile_stage("mul", "Q_and_RQ", n1, Q_even.batch_size,
             Q_even.length, Q_odd.length, true, profiler, [&]() {
                 return batch_mp_mul_shared_b(context, Q_even, R_even, Q_odd, Q_next, R_prod_1);
@@ -712,7 +948,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
         err = profile_compact(context, Q_next, "Q", n1, profiler);
         CHECK_AND_RETURN(err, release_all());
 
-        uint32_t shift_amount = 15u * ((n / n1) + ((n / n1) >> 4));
+
 
         R_prod_2.batch_size = n1 / 2;
         R_prod_2.length = R.length + P.length;
@@ -822,6 +1058,18 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
             std::swap(Q, Q_next);
             std::swap(R, R_next);
         }
+        // At this tree depth a shorter P product can reuse the first half
+        // of the transform for its larger sibling. Amortize the division
+        // over the upper levels of large trees.
+        if (N >= (1 << 22) && extra_common_limit >= kLargeBlockTerms &&
+            n1 == (uint32_t)N / (kLargeBlockTerms / 34)) {
+            err = profile_stage("exactdiv", "block_factor", n1, R.batch_size,
+                R.length, kLargeBlockTerms, false, profiler, [&]() {
+                    return cancel_block_factor(context, kLargeBlockTerms, P, Q, R,
+                        temp_prod_workspace_base, temp_words);
+                });
+            CHECK_AND_RETURN(err, release_all());
+        }
         if (n1 <= (uint32_t)N && extra_common_limit >= 34) {
             const uint64_t terms = (uint64_t)N * 34 / n1;
             const uint32_t *factors = nullptr; size_t count = 0;
@@ -860,7 +1108,7 @@ cudaError_t binary_split_batched(BatchMPContext * context, int N, BatchMPArray &
     release_array(P_next);
     release_array(Q_next);
     release_array(R_next);
-    cudaFree(temp_prod_workspace_base);
+    pi_memory::release(temp_prod_workspace_base);
     return cudaSuccess;
 }
 
@@ -932,10 +1180,10 @@ bool copy_device_array_to_host(const BatchMPArray & array, uint32_t ** host_data
     return true;
 }
 
-uint32_t compute_mod_hash(const uint32_t * limbs, uint32_t length) {
+uint32_t compute_mod_hash(const uint32_t *limbs, uint32_t length, uint64_t base = kLimbBaseMod) {
     uint64_t value = 0;
     for (int i = (int)length - 1; i >= 0; --i) {
-        value = (value * kLimbBaseMod + limbs[i]) % kValidationMod;
+        value = (value * base + limbs[i]) % kValidationMod;
     }
     return (uint32_t)value;
 }
@@ -993,14 +1241,70 @@ bool print_validation_summary(const BatchMPArray &Q, const BatchMPArray &R) {
     return true;
 }
 
-bool print_fractional_preview_summary(const BatchMPArray &ret) {
-    uint32_t * ret_host = nullptr;
-    if (!copy_device_array_to_host(ret, &ret_host)) {
-        delete [] ret_host;
-        return false;
+constexpr uint32_t kHashThreads = 256;
+constexpr uint32_t kHashBlockLimbs = 16 * kHashThreads;
+
+__host__ __device__ constexpr uint64_t limb_base_power(uint32_t n) {
+    uint64_t product = 1, base = kLimbBaseMod;
+    while (n) {
+        if (n & 1u) product = product * base % kValidationMod;
+        base = base * base % kValidationMod;
+        n >>= 1;
     }
-    print_hex_preview_with_hash("RET", ret_host, ret.length);
-    delete [] ret_host;
+    return product;
+}
+
+// Evaluate each block as a base-2^32 integer modulo kValidationMod.
+// Thread columns read coalesced limbs; adjacent columns then combine
+// with the same polynomial identity as adjacent blocks on the host.
+__global__ void hash_limb_blocks(const uint32_t *limbs, uint32_t length, uint32_t *hashes) {
+    __shared__ uint32_t partial[kHashThreads];
+    const uint32_t lane = threadIdx.x;
+    const size_t first = (size_t)blockIdx.x * kHashBlockLimbs + lane;
+    uint64_t h = 0;
+    for (int i = kHashBlockLimbs - kHashThreads; i >= 0; i -= (int)kHashThreads) {
+        const size_t index = first + i;
+        const uint32_t word = index < length ? limbs[index] : 0;
+        h = (h * limb_base_power(kHashThreads) + word) % kValidationMod;
+    }
+    partial[lane] = h;
+    uint64_t weight = kLimbBaseMod;
+    #pragma unroll
+    for (uint32_t step = 1; step < kHashThreads; step *= 2) {
+        __syncthreads();
+        if (lane % (2 * step) == 0)
+            partial[lane] = (partial[lane] + weight * partial[lane + step]) % kValidationMod;
+        weight = weight * weight % kValidationMod;
+    }
+    if (!lane) hashes[blockIdx.x] = partial[0];
+}
+
+bool print_fractional_preview_summary(const BatchMPArray &ret) {
+    if (ret.length <= kHashBlockLimbs) {
+        uint32_t *host = nullptr;
+        if (!copy_device_array_to_host(ret, &host)) return false;
+        print_hex_preview_with_hash("RET", host, ret.length);
+        delete [] host;
+        return true;
+    }
+
+    const uint32_t blocks = (ret.length - 1) / kHashBlockLimbs + 1;
+    BatchMPArray partial = batch_mp_array_create(1, blocks);
+    if (!partial.data) return false;
+    hash_limb_blocks<<<blocks, kHashThreads>>>(ret.data, ret.length, partial.data);
+    std::vector<uint32_t> hashes(blocks);
+    uint32_t low[2], high[2];
+    const bool ok = check_cuda(cudaGetLastError(), "hash_limb_blocks") &&
+        check_cuda(cudaMemcpy(hashes.data(), partial.data, blocks * sizeof(uint32_t),
+            cudaMemcpyDeviceToHost), "cudaMemcpy(block hashes)") &&
+        check_cuda(cudaMemcpy(low, ret.data, sizeof(low), cudaMemcpyDeviceToHost), "cudaMemcpy(low limbs)") &&
+        check_cuda(cudaMemcpy(high, ret.data + ret.length - 2, sizeof(high),
+            cudaMemcpyDeviceToHost), "cudaMemcpy(high limbs)");
+    batch_mp_array_release(partial);
+    if (!ok) return false;
+
+    const uint32_t hash = compute_mod_hash(hashes.data(), blocks, limb_base_power(kHashBlockLimbs));
+    printf("RET = %x%08x...%08x%08x hash = %u\n", high[1], high[0], low[1], low[0], hash);
     return true;
 }
 
@@ -1290,10 +1594,10 @@ cudaError_t recursive_inverse(
 
     size_t total_workspace = L_res + L_res2 + L_y2;
     uint32_t * workspace_base = nullptr;
-    err = cudaMalloc(&workspace_base, total_workspace * sizeof(uint32_t));
+    err = pi_memory::allocate(&workspace_base, total_workspace * sizeof(uint32_t));
     if (err != cudaSuccess) return err;
     auto release_all = [&]() {
-        cudaFree(workspace_base);
+        pi_memory::release(workspace_base);
     };
     uint32_t * workspace_cur = workspace_base;
 
@@ -1390,16 +1694,38 @@ cudaError_t recursive_inverse(
             .batch_size = 1,
             .stride = res1_m.length + y1.length
         };
-        err = profile_mul(context, res1_m, y1, res2, "res2*y", L2 >> 5, profiler);
-        CHECK_AND_RETURN(err, release_all());
-
+        // Only floor(res1_m*y1 / 2^L1) is consumed. Removing d low
+        // limbs from res1_m omits less than B^(d+y1.length), B=2^32.
+        // Two extra limbs below the binary point let us certify the exact
+        // quotient unless the upper guard limb can propagate a carry.
+        const uint32_t cut = L1 / 32;
+        const uint32_t drop = cut > y1.length + 2 && y1.length >= 4096
+            ? cut - y1.length - 2 : 0;
+        uint32_t omitted = 0;
+        if (drop && drop + 1 < res1_m.length) {
+            auto high = make_subview(res1_m, drop, res1_m.length - drop);
+            auto product = res2;
+            product.length -= drop;
+            err = profile_mul(context, high, y1, product, "res2_high*y", L2 >> 5, profiler);
+            CHECK_AND_RETURN(err, release_all());
+            uint32_t guard;
+            err = cudaMemcpy(&guard, product.data + cut - drop - 1, sizeof(guard),
+                cudaMemcpyDeviceToHost);
+            CHECK_AND_RETURN(err, release_all());
+            if (guard != UINT32_MAX) omitted = drop;
+        }
+        if (!omitted) {
+            err = profile_mul(context, res1_m, y1, res2, "res2*y", L2 >> 5, profiler);
+            CHECK_AND_RETURN(err, release_all());
+        }
         BatchMPArray y2 = {
             .data = y2_base,
-            .length = res2.length - (uint32_t)((L2 - m * 2) >> 5),
+            .length = res2.length - cut,
             .batch_size = 1,
-            .stride = res2.length - (uint32_t)((L2 - m * 2) >> 5)
+            .stride = res2.length - cut
         };
-        err = shift_right_large(context, res2, L2 - m * 2u, y2, "y2", L2 >> 5, profiler);
+        res2.length -= omitted;
+        err = shift_right_large(context, res2, L1 - (uint64_t)omitted * 32, y2, "y2", L2 >> 5, profiler);
         CHECK_AND_RETURN(err, release_all());
         if (is_negative){
             err = profile_add_small(context, y2, 1, y2, "y2_inc", L2 >> 5, profiler);
@@ -1439,7 +1765,7 @@ cudaError_t recursive_inverse(
             CHECK_AND_RETURN(err, release_all());
         }
     }
-    cudaFree(workspace_base);
+    pi_memory::release(workspace_base);
 
     return cudaSuccess;
 }
@@ -1502,24 +1828,24 @@ cudaError_t sqrt_10005(BatchMPContext * context, uint64_t target_digits, BatchMP
     uint32_t * d_work = nullptr;
     auto release_all = [&]() {
         if (d_P != nullptr) {
-            cudaFree(d_P);
+            pi_memory::release(d_P);
             d_P = nullptr;
         }
         if (d_Q != nullptr) {
-            cudaFree(d_Q);
+            pi_memory::release(d_Q);
             d_Q = nullptr;
         }
         if (d_work != nullptr) {
-            cudaFree(d_work);
+            pi_memory::release(d_work);
             d_work = nullptr;
         }
     };
-    cudaError_t err = cudaMalloc(&d_P, P_memory);
+    cudaError_t err = pi_memory::allocate(&d_P, P_memory);
     CHECK_AND_RETURN(err, release_all());
-    err = cudaMalloc(&d_Q, Q_memory);
+    err = pi_memory::allocate(&d_Q, Q_memory);
     CHECK_AND_RETURN(err, release_all());
     if (total_work_memory > 0) {
-        err = cudaMalloc(&d_work, total_work_memory);
+        err = pi_memory::allocate(&d_work, total_work_memory);
         CHECK_AND_RETURN(err, release_all());
     }
     uint32_t * cur_work_memory = d_work;
@@ -1611,40 +1937,75 @@ cudaError_t sqrt_10005(BatchMPContext * context, uint64_t target_digits, BatchMP
         P = next_P;
         Q = next_Q;
     }
-    cudaFree(d_work);
+    pi_memory::release(d_work);
     return cudaSuccess;
 }
 
-// A two-subtree forest avoids rounding the entire term count up to the
-// next power of two. Both subtrees still use the tuned batched kernels.
-static cudaError_t binary_split_two(BatchMPContext *ctx, uint32_t left_blocks,
-    uint32_t right_blocks, BatchMPArray &Q, BatchMPArray &R, StageProfiler *profiler) {
-    BatchMPArray p{}, ql{}, rl{}, qr{}, rr{}, rq{}, pr{};
+// Build bounded batches, retaining just the populated limbs while evaluating
+// the sibling tree. All precision cuts use the global Chudnovsky term index.
+static cudaError_t split_forest(BatchMPContext *ctx, uint32_t offset, uint32_t blocks,
+    uint64_t digits, bool need_p, SplitRow &out, StageProfiler *profiler) {
+    constexpr uint32_t max_batch = 1u << 22;
+    if (blocks <= max_batch && !(blocks & (blocks - 1))) {
+        SplitRow batch{};
+        cudaError_t err = binary_split_batched(ctx, blocks, batch.q, batch.r,
+            profiler, offset, need_p ? &batch.p : nullptr, digits);
+        SplitRow view = batch;
+        if (err == cudaSuccess) err = trim_split_row(ctx, view, offset * 17, digits);
+        auto pack = [&](BatchMPArray src, BatchMPArray &dest) {
+            if (!src.data || err != cudaSuccess) return;
+            dest = batch_mp_array_create(1, src.length);
+            err = dest.data ? cudaMemcpyAsync(dest.data, src.data, (size_t)src.length * sizeof(uint32_t),
+                cudaMemcpyDeviceToDevice) : cudaErrorMemoryAllocation;
+        };
+        pack(view.p, out.p);
+        pack(view.q, out.q);
+        pack(view.r, out.r);
+        for (auto col : {batch.p, batch.q, batch.r}) batch_mp_array_release(col);
+        return err;
+    }
+    const uint32_t left = 1u << (31 - __builtin_clz(blocks - 1));
+    const uint32_t right = blocks - left;
+    SplitRow l{}, r{};
+    BatchMPArray rq{}, pr{};
     auto cleanup = [&]() {
-        for (auto a : {p, ql, rl, qr, rr, rq, pr}) batch_mp_array_release(a);
+        for (auto col : {l.p, l.q, l.r, r.p, r.q, r.r, rq, pr}) batch_mp_array_release(col);
     };
-    cudaError_t err = binary_split_batched(ctx, left_blocks, ql, rl, profiler, 0, &p);
+    cudaError_t err = split_forest(ctx, offset, left, digits, true, l, profiler);
     CHECK_AND_RETURN(err, cleanup());
-    err = binary_split_batched(ctx, right_blocks, qr, rr, profiler, left_blocks);
+    err = split_forest(ctx, offset + left, right, digits, need_p, r, profiler);
     CHECK_AND_RETURN(err, cleanup());
-    Q = batch_mp_array_create(1, ql.length + qr.length);
-    rq = batch_mp_array_create(1, rl.length + qr.length);
-    pr = batch_mp_array_create(1, p.length + rr.length);
-    if (!Q.data || !rq.data || !pr.data) { cleanup(); return cudaErrorMemoryAllocation; }
-    err = profile_stage("mul", "forest_Q_RQ", 2, 1, ql.length, qr.length, true,
-        profiler, [&]() { return batch_mp_mul_shared_b(ctx, ql, rl, qr, Q, rq); });
+    SplitRow lv = l, rv = r;
+    err = trim_split_row(ctx, lv, offset * 17, digits);
     CHECK_AND_RETURN(err, cleanup());
-    err = profile_mul(ctx, p, rr, pr, "forest_PR", 2, profiler);
+    err = trim_split_row(ctx, rv, (offset + left) * 17, digits);
     CHECK_AND_RETURN(err, cleanup());
-    uint32_t shift = right_blocks * 17u * 15u;
-    R = batch_mp_array_create(1, std::max(rq.length + (shift+31u)/32u, pr.length) + 1);
-    if (!R.data) { cleanup(); return cudaErrorMemoryAllocation; }
-    err = profile_shift_addsub(ctx, rq, pr, R, shift, (left_blocks & 1u) != 0, 2, profiler);
+    out.q = batch_mp_array_create(1, lv.q.length + rv.q.length);
+    rq = batch_mp_array_create(1, lv.r.length + rv.q.length);
+    if (!out.q.data || !rq.data) { cleanup(); return cudaErrorMemoryAllocation; }
+    err = profile_stage("mul", "forest_Q_RQ", blocks, 1, lv.q.length, rv.q.length, true,
+        profiler, [&]() { return batch_mp_mul_shared_b(ctx, lv.q, lv.r, rv.q, out.q, rq); });
     CHECK_AND_RETURN(err, cleanup());
-    err = Q.compact(ctx);
-    if (err == cudaSuccess) err = R.compact(ctx);
+    release_array(&l.q); release_array(&l.r); release_array(&r.q);
+    pr = batch_mp_array_create(1, lv.p.length + rv.r.length);
+    if (!pr.data) { cleanup(); return cudaErrorMemoryAllocation; }
+    if (need_p) {
+        out.p = batch_mp_array_create(1, lv.p.length + rv.p.length);
+        if (!out.p.data) { cleanup(); return cudaErrorMemoryAllocation; }
+        err = profile_stage("mul", "forest_P_PR", blocks, 1, lv.p.length, rv.p.length,
+            true, profiler, [&]() { return batch_mp_mul_shared_b(ctx, rv.p, rv.r, lv.p, out.p, pr); });
+    } else {
+        err = profile_mul(ctx, lv.p, rv.r, pr, "forest_PR", blocks, profiler);
+    }
+    CHECK_AND_RETURN(err, cleanup());
+    release_array(&l.p); release_array(&r.p); release_array(&r.r);
+    const uint32_t shift = right * 17u * 15u;
+    out.r = batch_mp_array_create(1, std::max(rq.length + (shift+31u)/32u, pr.length) + 1);
+    if (!out.r.data) { cleanup(); return cudaErrorMemoryAllocation; }
+    err = profile_shift_addsub(ctx, rq, pr, out.r, shift, (left & 1u) != 0, blocks, profiler);
     cleanup();
-    return err;
+    if (err == cudaSuccess) err = out.q.compact(ctx);
+    return err == cudaSuccess ? out.r.compact(ctx) : err;
 }
 
 cudaError_t pi_fractional(BatchMPContext * context, uint64_t target_digits, BatchMPArray & P, BatchMPArray & Q, BatchMPArray & P_base, BatchMPArray & Q_base, StageProfiler * profiler = nullptr) {
@@ -1705,10 +2066,16 @@ cudaError_t pi_fractional(BatchMPContext * context, uint64_t target_digits, Batc
     while (((double)left_blocks + right_blocks) * 17.0 * 14.18 < working_digits)
         right_blocks *= 2;
     bool forest = left_blocks > 0 && right_blocks < left_blocks && !getenv("GPUPI_SINGLE_TREE");
-    cudaError_t err = forest
-        ? binary_split_two(context, left_blocks, right_blocks, Q_bs, R_bs, profiler)
-        : binary_split_batched(context, N, Q_bs, R_bs, profiler);
     if (forest) N = left_blocks + right_blocks;
+    cudaError_t err;
+    if (forest || N > (1 << 22)) {
+        SplitRow result{};
+        err = split_forest(context, 0, N, target_digits, false, result, profiler);
+        Q_bs = result.q;
+        R_bs = result.r;
+    } else {
+        err = binary_split_batched(context, N, Q_bs, R_bs, profiler, 0, nullptr, target_digits);
+    }
     CHECK_AND_RETURN(err, release_all());
     long r_total_shift = 15ull * N * 17 - 8;
     // At small sizes, common-factor cancellation can leave Q shorter than
@@ -1769,13 +2136,18 @@ cudaError_t pi_fractional(BatchMPContext * context, uint64_t target_digits, Batc
     CHECK_AND_RETURN(err, release_all());
 
     P_final = batch_mp_array_create(1, P_15.length + Q_truncated.length);
-    Q_final = batch_mp_array_create(1, Q_15.length + R_truncated.length);
-    if (P_final.data == nullptr || Q_final.data == nullptr) {
+    if (P_final.data == nullptr) {
         CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
     }
 
     err = profile_mul(context, P_15, Q_truncated, P_final, "P15*Q", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
+    release_array(&Q_bs);
+    release_array(&P_15);
+    Q_final = batch_mp_array_create(1, Q_15.length + R_truncated.length);
+    if (!Q_final.data) {
+        CHECK_AND_RETURN(cudaErrorMemoryAllocation, release_all());
+    }
     err = profile_mul(context, R_truncated, Q_15, Q_final, "R*Q15", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
@@ -1784,9 +2156,7 @@ cudaError_t pi_fractional(BatchMPContext * context, uint64_t target_digits, Batc
     err = profile_compact(context, Q_final, "Q", target_digits, profiler);
     CHECK_AND_RETURN(err, release_all());
 
-    release_array(&Q_bs);
     release_array(&R_shifted);
-    release_array(&P_15);
     release_array(&Q_15);
 
     extra_limbs = std::max(0l, std::min((long)P_final.length, (long)Q_final.length) - prec_limbs);
@@ -2261,10 +2631,17 @@ int main_fractional(int argc, char ** argv){
         }
     }
 
+    pi_memory::PoolScope memory_pool;
     BatchMPContext * context = batch_mp_init();
     if (context == nullptr) {
         fprintf(stderr, "batch_mp_init failed\n");
         return 1;
+    }
+
+    if (target_digits > 1000000000ull) {
+        size_t free_bytes, total_bytes;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess && total_bytes <= (40ull << 30))
+            batch_mp_limit_large_products(context, 6ull << 30);
     }
 
     BatchMPArray P{};
@@ -2286,7 +2663,7 @@ int main_fractional(int argc, char ** argv){
 
     auto release_decimal = [&]() {
         if (d_decimal_digits != nullptr) {
-            cudaFree(d_decimal_digits);
+            pi_memory::release(d_decimal_digits);
             d_decimal_digits = nullptr;
         }
         convert_decimal_release_powers(&decimal_powers);
@@ -2314,7 +2691,7 @@ int main_fractional(int argc, char ** argv){
         return 1;
     }
     if (requested_digits > 0u) {
-        if (!check_cuda(cudaMalloc(&d_decimal_digits, convert_digits), "cudaMalloc(decimal_digits)")) {
+        if (!check_cuda(pi_memory::allocate(&d_decimal_digits, convert_digits), "cudaMalloc(decimal_digits)")) {
             cudaEventDestroy(start_event);
             cudaEventDestroy(stop_event);
             release_decimal();

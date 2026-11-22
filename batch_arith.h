@@ -40,6 +40,10 @@ BatchMPContext * batch_mp_init();
 // Release all buffers owned by the context. Accepts nullptr.
 void batch_mp_destroy(BatchMPContext * ctx);
 
+// Limit the NTT scratch for ordinary and shared multiplications. Zero restores
+// unrestricted transforms. Oversized products use disjoint output and tile storage.
+void batch_mp_limit_large_products(BatchMPContext *ctx, size_t budget);
+
 // Return the currently allocated shared workspace size in bytes. Accepts nullptr.
 size_t batch_mp_workspace_size(const BatchMPContext * ctx);
 
@@ -163,3 +167,9 @@ cudaError_t batch_mp_mul_shared_b(BatchMPContext *ctx, BatchMPArray A,
 // The input length limit is the same as batch_mp_exactdiv_small.
 cudaError_t batch_mp_exactdiv_small_many(BatchMPContext *ctx, BatchMPArray A,
     const uint32_t *divisors, uint32_t count);
+
+// Adjacent binary-split rows. shifted holds the already shifted left R for
+// each pair. A missing final P is permitted. Returns cudaErrorNotSupported
+// when the operand sizes favor separate multiplications.
+cudaError_t batch_mp_split_merge(BatchMPContext *ctx, BatchMPArray p, BatchMPArray q,
+    BatchMPArray r, BatchMPArray shifted, BatchMPArray po, BatchMPArray qo, BatchMPArray ro);

@@ -1,6 +1,8 @@
+#include "pi_device_memory.h"
 #include "batch_arith.h"
 
 #include <new>
+#include <algorithm>
 
 #include "batch_add.h"
 #include "batch_add_small.h"
@@ -19,19 +21,28 @@ struct BatchMPContext {
     NTTPrecomputedTables ntt_tables;
     uint32_t *workspace;
     size_t workspace_size_bytes;
+    size_t multiplication_budget;
 };
 
 namespace {
 
 cudaError_t allocate_ntt_tables(BatchMPContext *ctx) {
-    cudaError_t err = cudaMalloc(&ctx->ntt_tables.roots_table_lv1, 65536 * sizeof(uint3));
+    cudaError_t err = pi_memory::allocate(&ctx->ntt_tables.roots_table_lv1, 65536 * sizeof(uint3));
     if (err != cudaSuccess) return err;
 
-    err = cudaMalloc(&ctx->ntt_tables.roots_table_lv2, 65536 * sizeof(uint3));
+    err = pi_memory::allocate(&ctx->ntt_tables.roots_table_lv2, 65536 * sizeof(uint3));
     if (err != cudaSuccess) return err;
 
-    err = cudaMalloc(&ctx->ntt_tables.inv2n_table, 33 * sizeof(uint3));
+    err = pi_memory::allocate(&ctx->ntt_tables.inv2n_table, 33 * sizeof(uint3));
     if (err != cudaSuccess) return err;
+
+    err = pi_memory::allocate(&ctx->ntt_tables.expanded, (1u << kRootTableBits) * sizeof(uint3));
+    if (err == cudaErrorMemoryAllocation) {
+        ctx->ntt_tables.expanded = nullptr;
+        cudaGetLastError();
+    } else if (err != cudaSuccess) {
+        return err;
+    }
 
     init_ntt_precomputed_tables(&ctx->ntt_tables);
 
@@ -49,13 +60,13 @@ cudaError_t ensure_workspace(BatchMPContext *ctx, size_t required_bytes) {
     // Scratch has no live contents between arithmetic calls. Release it before
     // growth so the old and new multi-GiB NTT arenas never coexist.
     if (ctx->workspace != nullptr) {
-        cudaError_t err = cudaFree(ctx->workspace);
+        cudaError_t err = pi_memory::release(ctx->workspace);
         if (err != cudaSuccess) return err;
         ctx->workspace = nullptr;
         ctx->workspace_size_bytes = 0;
     }
     uint32_t *new_workspace = nullptr;
-    cudaError_t err = cudaMalloc(&new_workspace, required_bytes);
+    cudaError_t err = pi_memory::allocate(&new_workspace, required_bytes);
     if (err != cudaSuccess) return err;
 
     ctx->workspace = new_workspace;
@@ -65,21 +76,22 @@ cudaError_t ensure_workspace(BatchMPContext *ctx, size_t required_bytes) {
 
 void release_context_buffers(BatchMPContext *ctx) {
     if (ctx->workspace != nullptr) {
-        cudaFree(ctx->workspace);
+        pi_memory::release(ctx->workspace);
         ctx->workspace = nullptr;
     }
     ctx->workspace_size_bytes = 0;
 
     if (ctx->ntt_tables.roots_table_lv1 != nullptr) {
-        cudaFree(ctx->ntt_tables.roots_table_lv1);
+        pi_memory::release(ctx->ntt_tables.roots_table_lv1);
         ctx->ntt_tables.roots_table_lv1 = nullptr;
     }
     if (ctx->ntt_tables.roots_table_lv2 != nullptr) {
-        cudaFree(ctx->ntt_tables.roots_table_lv2);
+        pi_memory::release(ctx->ntt_tables.roots_table_lv2);
         ctx->ntt_tables.roots_table_lv2 = nullptr;
     }
+    if (ctx->ntt_tables.expanded) pi_memory::release(ctx->ntt_tables.expanded);
     if (ctx->ntt_tables.inv2n_table != nullptr) {
-        cudaFree(ctx->ntt_tables.inv2n_table);
+        pi_memory::release(ctx->ntt_tables.inv2n_table);
         ctx->ntt_tables.inv2n_table = nullptr;
     }
 }
@@ -124,7 +136,7 @@ BatchMPArray batch_mp_array_create(uint32_t batch_size, uint32_t length, uint32_
         return array;
     }
 
-    if (cudaMalloc(&array.data, bytes) != cudaSuccess) {
+    if (pi_memory::allocate(&array.data, bytes) != cudaSuccess) {
         array = {};
     }
     return array;
@@ -132,7 +144,7 @@ BatchMPArray batch_mp_array_create(uint32_t batch_size, uint32_t length, uint32_
 
 void batch_mp_array_release(BatchMPArray array) {
     if (array.data != nullptr) {
-        cudaFree(array.data);
+        pi_memory::release(array.data);
     }
 }
 
@@ -165,6 +177,46 @@ size_t batch_mp_workspace_size(const BatchMPContext *ctx) {
     return (ctx == nullptr) ? 0u : ctx->workspace_size_bytes;
 }
 
+void batch_mp_limit_large_products(BatchMPContext *ctx, size_t budget) {
+    ctx->multiplication_budget = budget;
+}
+
+// Overlap-add whole-limb products. The suffix includes the remaining high
+// limbs so that carries propagate across tile boundaries.
+static cudaError_t tiled_mul(BatchMPContext *ctx, BatchMPArray a,
+    BatchMPArray b, BatchMPArray out) {
+    uint32_t tile = 1;
+    while (tile < (1u << 29) &&
+           batch_mul_ntt_workspace_size(1, 2 * tile, 2 * tile) <= ctx->multiplication_budget)
+        tile *= 2;
+    auto temporary = batch_mp_array_create(1, 2 * tile);
+    if (!temporary.data) return cudaErrorMemoryAllocation;
+    cudaError_t err = cudaSuccess;
+    for (uint32_t row = 0; row < out.batch_size && err == cudaSuccess; ++row) {
+        auto *dest = out.data + (size_t)row * out.stride;
+        err = cudaMemsetAsync(dest, 0, (size_t)out.length * sizeof(uint32_t));
+        for (uint32_t i = 0; i < a.length && err == cudaSuccess; i += tile) {
+            const uint32_t na = std::min(tile, a.length - i);
+            BatchMPArray x{a.data + (size_t)row * a.stride + i, na, 1, na};
+            for (uint32_t j = 0; j < b.length && err == cudaSuccess; j += tile) {
+                const uint32_t nb = std::min(tile, b.length - j);
+                BatchMPArray y{b.data + (size_t)row * b.stride + j, nb, 1, nb};
+                temporary.length = na + nb;
+                // The linear transform for a tile pair fits the budget, even
+                // when the parent selected tiling because of its batch size.
+                err = batch_mp_mul(ctx, x, y, temporary);
+                if (err == cudaSuccess) {
+                    uint32_t length = out.length - i - j;
+                    BatchMPArray sum{dest + i + j, length, 1, length};
+                    err = batch_mp_add(ctx, sum, temporary, sum);
+                }
+            }
+        }
+    }
+    batch_mp_array_release(temporary);
+    return err;
+}
+
 cudaError_t batch_mp_mul(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, BatchMPArray C) {
     if (ctx == nullptr || !valid_array(A) || !valid_array(B) || !valid_array(C)) {
         return cudaErrorInvalidValue;
@@ -188,6 +240,8 @@ cudaError_t batch_mp_mul(BatchMPContext *ctx, BatchMPArray A, BatchMPArray B, Ba
     }
 
     const size_t workspace_size = batch_mul_ntt_workspace_size(A.batch_size, A.length, B.length);
+    if (ctx->multiplication_budget && workspace_size > ctx->multiplication_budget)
+        return tiled_mul(ctx, A, B, C);
     cudaError_t err = ensure_workspace(ctx, workspace_size);
     if (err != cudaSuccess) {
         return err;
@@ -432,7 +486,7 @@ cudaError_t batch_mp_mul_shared_b(BatchMPContext *ctx, BatchMPArray A,
         out_a.length > (1ull << 31) || out_c.length > (1ull << 31))
         return cudaErrorInvalidValue;
     size_t bytes = batch_mul_ntt_shared_b_workspace_size(A.batch_size, A.length, C.length, B.length);
-    if (!bytes) {
+    if (!bytes || (ctx->multiplication_budget && bytes > ctx->multiplication_budget)) {
         cudaError_t err = batch_mp_mul(ctx, A, B, out_a);
         return err == cudaSuccess ? batch_mp_mul(ctx, C, B, out_c) : err;
     }
@@ -451,5 +505,26 @@ cudaError_t batch_mp_exactdiv_small_many(BatchMPContext *ctx, BatchMPArray A,
     for (uint32_t i = 0; i < count; ++i)
         if (!divisors[i] || !(divisors[i] & 1u)) return cudaErrorInvalidValue;
     batch_exactdiv_small_many(A.data, divisors, count, A.batch_size, A.length, A.stride);
+    return cudaGetLastError();
+}
+
+cudaError_t batch_mp_split_merge(BatchMPContext *ctx, BatchMPArray p, BatchMPArray q,
+    BatchMPArray r, BatchMPArray shifted, BatchMPArray po, BatchMPArray qo, BatchMPArray ro) {
+    const uint32_t pairs = qo.batch_size;
+    if (!ctx || !pairs || !valid_array(p) || !valid_array(q) || !valid_array(r) ||
+        !valid_array(shifted) || !valid_array(po) || !valid_array(qo) || !valid_array(ro) ||
+        q.batch_size != 2ull * pairs || r.batch_size != q.batch_size ||
+        (p.batch_size != q.batch_size && p.batch_size + 1ull != q.batch_size) ||
+        po.batch_size != p.batch_size / 2 || ro.batch_size != pairs || shifted.batch_size != pairs ||
+        !p.stride || !q.stride || !r.stride || !shifted.stride || !po.stride || !qo.stride || !ro.stride ||
+        po.length != 2ull * p.length || qo.length != 2ull * q.length ||
+        ro.length <= (uint64_t)shifted.length + q.length ||
+        ro.length <= (uint64_t)p.length + r.length)
+        return cudaErrorInvalidValue;
+    const size_t bytes = batch_ntt_merge_workspace(po, qo, ro);
+    if (!bytes) return cudaErrorNotSupported;
+    cudaError_t err = ensure_workspace(ctx, bytes);
+    if (err != cudaSuccess) return err;
+    batch_ntt_merge(p, q, r, shifted, po, qo, ro, ctx->workspace, bytes, ctx->ntt_tables);
     return cudaGetLastError();
 }
